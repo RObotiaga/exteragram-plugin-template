@@ -33,7 +33,7 @@
 
 `refmap.yml` находится в корне архива и объявляет `assets: assets`. EAF является обычным ZIP-совместимым архивом, поэтому его структуру можно проверить стандартными ZIP-инструментами.
 
-DEX больше не переводится в hex и не вставляется в `main.py`. `JvmPluginBridge` определяет каталог `main.py` через `__file__`, читает `assets/classes.dex` как бинарные данные и передаёт их в `InMemoryDexClassLoader`.
+DEX больше не переводится в hex и не вставляется в `main.py`. В structured Elyx runtime `__file__` может отсутствовать, поэтому `JvmPluginBridge` в первую очередь определяет корень установленного EAF через `file_utils.get_plugins_dir()` и читает `<plugins-dir>/ElyxPlugins/<plugin-id>/assets/classes.dex`. Путь относительно `__file__` остаётся только дополнительным compatibility fallback.
 
 Старый hex-механизм остаётся резервным только для `just embed`, чтобы не ломать однофайловую совместимость во время миграции.
 
@@ -167,12 +167,12 @@ Workflow **Release** запускается вручную и принимает
 ## Прочие команды
 
 - `just loc` — перегенерировать i18n-файлы без полной пересборки DEX.
-- `just watch` — старый однофайловый live-reload; структурированный Elyx live-reload будет отдельным этапом миграции.
+- `just watch` — старый однофайловый live-reload; structured Elyx live-reload будет отдельным этапом миграции.
 - `just gen-stubs <rt.jar> <android.jar>` — стабы для автодополнения в Python.
 
 ## Статус миграции
 
-Многофайловый EAF и бинарный DEX уже разделены: Python-код остаётся обычным исходным кодом, а JVM-движок хранится отдельным `assets/classes.dex`. Structured identity теперь берётся из `metainfo.yml` и проверяется сборщиком. Следующий независимый этап — перевести dev-watch на структурированный Elyx live-reload, чтобы изменения Python-файлов и DEX синхронизировались на устройство независимо.
+Многофайловый EAF и бинарный DEX разделены: Python-код остаётся обычным исходным кодом, а JVM-движок хранится отдельным `assets/classes.dex`. Structured identity берётся из `metainfo.yml` и синхронизируется с Python/JVM metadata. Загрузка DEX из structured Elyx каталога и Python → JVM callback подтверждены на реальном AyuGram runtime. Следующий независимый этап — перевести dev-watch на structured Elyx live-reload, чтобы изменения Python-файлов и DEX синхронизировались на устройство независимо.
 
 ## Лицензия
 

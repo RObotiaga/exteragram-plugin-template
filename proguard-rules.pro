@@ -19,4 +19,9 @@
 }
 
 -dontobfuscate
--keepattributes *Annotation*,InnerClasses,EnclosingMethod,Signature
+
+# Keep metadata which can be observed at runtime, but deliberately drop
+# RuntimeInvisibleAnnotations. Compile-only markers such as AndroidX @AnyThread,
+# JetBrains annotations and animal-sniffer annotations have CLASS retention and
+# must not become runtime dependencies of the standalone in-memory DEX.
+-keepattributes RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations,AnnotationDefault,InnerClasses,EnclosingMethod,Signature

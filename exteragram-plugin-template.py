@@ -5,6 +5,7 @@ from org.telegram.ui.ActionBar import AlertDialog
 from client_utils import get_last_fragment
 from ui.bulletin import BulletinHelper
 from android_utils import run_on_ui_thread, copy_to_clipboard
+from file_utils import get_plugins_dir
 import traceback
 from android.util import Log
 import threading
@@ -17,17 +18,18 @@ import os
 from java.lang import Class, String, Long
 from typing import Optional, Any, cast
 
-__id__ = "exteragram-plugin-template"
+__id__ = "exteragram_plugin_template"
 __name__ = "exteraGram plugin template"
 __description__ = "Шаблон плагина exteraGram с Kotlin/DEX-движком и многофайловой EAF-сборкой"
-__author__ = "@n08i40k_extera"
-__version__ = "0.0.0"
+__author__ = "@me_tema"
+__version__ = "0.1.0"
 __min_version__ = "12.1.1"
 
 LOGCAT_TAG = __id__
 
 JVM_PLUGIN_CLASS = "ru.n08i40k.template.Plugin"
 DEX_ASSET_RELATIVE_PATH = os.path.join("assets", "classes.dex")
+ELYX_PLUGINS_DIRNAME = "ElyxPlugins"
 
 # Legacy single-file .plugin compatibility. EAF builds use assets/classes.dex.
 DEX_COMMENT_BEGIN = "# === EMDEDDED DEX BEGIN ==="
@@ -112,8 +114,9 @@ class JvmPluginBridge:
         self.klass = None
 
     def load(self):
-        dex_data = self._read_asset_dex()
-        dex_source = DEX_ASSET_RELATIVE_PATH
+        dex_result = self._read_asset_dex()
+        dex_data = dex_result[0] if dex_result is not None else None
+        dex_source = dex_result[1] if dex_result is not None else DEX_ASSET_RELATIVE_PATH
 
         if dex_data is None:
             dex_data = self._read_embedded_dex()
@@ -150,32 +153,62 @@ class JvmPluginBridge:
 
         return self.klass.getDeclaredMethod(String(name), *types).invoke(None, *args)
 
-    def _read_asset_dex(self) -> Optional[bytes]:
-        own_file = globals().get("__file__")
-        if not isinstance(own_file, str) or not own_file:
-            self.plugin.log("__file__ is unavailable; cannot resolve EAF DEX asset")
-            return None
+    def _eaf_root_candidates(self) -> list[str]:
+        candidates: list[str] = []
 
-        dex_path = os.path.join(
-            os.path.dirname(os.path.abspath(own_file)),
-            DEX_ASSET_RELATIVE_PATH,
-        )
+        own_file = globals().get("__file__")
+        if isinstance(own_file, str) and own_file:
+            candidates.append(os.path.dirname(os.path.abspath(own_file)))
 
         try:
-            with open(dex_path, "rb") as f:
-                dex_data = f.read()
-        except FileNotFoundError:
-            self.plugin.log(f"DEX asset not found at {dex_path}; trying legacy payload")
-            return None
+            plugins_dir = os.path.abspath(str(get_plugins_dir()))
+            candidates.append(os.path.join(plugins_dir, ELYX_PLUGINS_DIRNAME, __id__))
+            # Keep an additional layout candidate for engines which expose the
+            # structured plugin directory directly below get_plugins_dir().
+            candidates.append(os.path.join(plugins_dir, __id__))
         except Exception as e:
-            self.plugin.log_exception(f"Failed to read DEX asset at {dex_path}", e)
-            return None
+            self.plugin.log_exception("Failed to resolve plugins directory", e)
 
-        if not dex_data:
-            self.plugin.log(f"DEX asset is empty at {dex_path}")
-            return None
+        unique: list[str] = []
+        seen: set[str] = set()
+        for path in candidates:
+            normalized = os.path.normpath(path)
+            if normalized not in seen:
+                seen.add(normalized)
+                unique.append(normalized)
 
-        return dex_data
+        return unique
+
+    def _read_asset_dex(self) -> Optional[tuple[bytes, str]]:
+        checked_paths: list[str] = []
+
+        for root in self._eaf_root_candidates():
+            dex_path = os.path.join(root, DEX_ASSET_RELATIVE_PATH)
+            checked_paths.append(dex_path)
+
+            try:
+                with open(dex_path, "rb") as f:
+                    dex_data = f.read()
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                self.plugin.log_exception(f"Failed to read DEX asset at {dex_path}", e)
+                continue
+
+            if not dex_data:
+                self.plugin.log(f"DEX asset is empty at {dex_path}")
+                continue
+
+            return dex_data, dex_path
+
+        if checked_paths:
+            self.plugin.log(
+                "DEX asset not found; checked: " + ", ".join(checked_paths)
+            )
+        else:
+            self.plugin.log("Could not resolve any EAF plugin root candidate")
+
+        return None
 
     def _read_own_source(self) -> Optional[str]:
         candidates: list[str] = []
@@ -184,19 +217,28 @@ class JvmPluginBridge:
         if isinstance(own_file, str) and own_file:
             candidates.append(own_file)
 
-        plugins_dir_getter = globals().get("get_plugins_dir")
-        if callable(plugins_dir_getter):
-            try:
-                candidates.append(os.path.join(plugins_dir_getter(), f"{__id__}.py"))
-            except Exception as e:
-                self.plugin.log_exception("Failed to resolve plugins directory", e)
+        for root in self._eaf_root_candidates():
+            candidates.append(os.path.join(root, "main.py"))
 
+        try:
+            candidates.append(os.path.join(str(get_plugins_dir()), f"{__id__}.py"))
+        except Exception as e:
+            self.plugin.log_exception("Failed to resolve legacy plugin source path", e)
+
+        seen: set[str] = set()
         for path in candidates:
+            normalized = os.path.normpath(path)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(normalized, "r", encoding="utf-8") as f:
                     return f.read()
+            except FileNotFoundError:
+                continue
             except Exception as e:
-                self.plugin.log_exception(f"Failed to read plugin source at {path}", e)
+                self.plugin.log_exception(f"Failed to read plugin source at {normalized}", e)
 
         return None
 
