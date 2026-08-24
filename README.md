@@ -167,7 +167,7 @@ Workflow **Release** запускается вручную и принимает
 ## Прочие команды
 
 - `just loc` — перегенерировать i18n-файлы без полной пересборки DEX.
-- `just watch` — старый однофайловый live-reload; структурированный Elyx live-reload будет отдельным этапом миграции.
+- `just watch` — старый однофайловый live-reload; structured Elyx live-reload будет отдельным этапом миграции.
 - `just gen-stubs <rt.jar> <android.jar>` — стабы для автодополнения в Python.
 
 ## Статус миграции
