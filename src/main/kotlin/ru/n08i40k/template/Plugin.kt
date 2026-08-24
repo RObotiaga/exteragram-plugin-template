@@ -3,7 +3,6 @@ package ru.n08i40k.template
 import android.content.Context
 import android.content.SharedPreferences
 import android.webkit.ValueCallback
-import androidx.annotation.AnyThread
 import de.comahe.i18n4k.config.I18n4kConfigDefault
 import de.comahe.i18n4k.createLocale
 import de.comahe.i18n4k.i18n4k
@@ -17,7 +16,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
-import org.jetbrains.annotations.Blocking
 import org.telegram.messenger.ApplicationLoader
 import org.telegram.messenger.LocaleController
 import ru.n08i40k.template.event.eject.EjectNotifier
@@ -40,6 +38,10 @@ typealias LogReceiver = ValueCallback<String>
  *
  * Every `@JvmStatic` method of the companion object is called reflectively from the
  * Python side, so their names and signatures must stay in sync with the plugin .py.
+ *
+ * Keep runtime entry classes free of compile-only annotations. ART may need to
+ * resolve every type retained in the final DEX while linking this class, and a
+ * compile-only annotation is not guaranteed to exist in the host class loader.
  */
 class Plugin private constructor() {
     @Suppress("unused")
@@ -69,7 +71,6 @@ class Plugin private constructor() {
         fun getVersion(): String? = VERSION
 
         @Synchronized
-        @Blocking
         @JvmStatic
         fun inject(
             version: String,
@@ -121,7 +122,6 @@ class Plugin private constructor() {
          * Called after [inject] once the Python side has registered its UI. Put here
          * everything that may touch the host UI or needs the plugin to be fully built.
          */
-        @Blocking
         @Synchronized
         @JvmStatic
         fun finalizeInject() {
@@ -152,20 +152,17 @@ class Plugin private constructor() {
             INSTANCE = null
         }
 
-        @AnyThread
         private fun ejectPromise(): Thread =
             thread(
                 contextClassLoader = Plugin::class.java.classLoader,
                 block = ::ejectSynchronized
             )
 
-        @AnyThread
         @JvmStatic
         fun eject() {
             ejectPromise()
         }
 
-        @AnyThread
         @JvmStatic
         fun getSharedPrefs(): SharedPreferences =
             ApplicationLoader.applicationContext.getSharedPreferences(
@@ -208,7 +205,6 @@ class Plugin private constructor() {
         Logger.info("Inject finalized!")
     }
 
-    @Blocking
     private fun onEject() {
         Logger.info("onEject called!")
 
