@@ -35,6 +35,43 @@ official exteraGram documentation as live sources of truth.
    whole skill into context by default.
 5. When an API, class name, method signature or packaging rule can vary by
    version, verify it against the current docs or the exact target APK/source.
+6. For an existing failure, identify the earliest failing layer before editing.
+   Do not treat a downstream message such as `JVM plugin is not loaded` as the
+   root cause when startup logs contain an earlier DEX/path/class-link failure.
+
+## Field-tested non-negotiable gates
+
+These rules come from failures reproduced while building and validating this template on
+AyuGram/Elyx. Treat them as regression constraints unless the architecture is deliberately
+changed and revalidated.
+
+- `assets/classes.dex` does **not** prove that `assets/` exists as a ZIP directory entry.
+  When refmap declares directories, emit and validate explicit directory entries such as
+  `assets/` and `src/`.
+- Structured Elyx may execute `main.py` without defining `__file__`. Required assets must not
+  depend solely on `os.path.dirname(__file__)`; prefer Elyx asset APIs or a documented runtime
+  helper/fallback.
+- Keep Python `__id__`, `metainfo.id`, JVM `Plugin.ID`/equivalent and artifact identity
+  synchronized. Keep supported version surfaces synchronized too. Do not pin the plugin author
+  to the template maintainer in CI.
+- A clean Kotlin/R8 build does not prove that the standalone DEX can link on ART. Validate the
+  final release DEX runtime type surface and reject accidental compile-only types.
+- Do not use broad R8 `-ignorewarnings` to make a DEX build green. Resolve missing classes,
+  relocation, dex2jar naming and stale consumer rules by cause.
+- Relocating a library can invalidate its bundled ProGuard/R8 rules. Strip stale package-name
+  rules, but translate semantically required rules (for example coroutine volatile-field
+  preservation) to the relocated namespace rather than silently dropping them.
+- Synthetic DEX smoke tests prove archive plumbing only. Runtime-critical DEX changes require
+  real Gradle/R8/D8 output and an on-device class-load/bridge test.
+- Core JVM load failure is fatal to the bridge feature. Preserve the first cause and do not
+  register UI that can only produce a later `JVM plugin is not loaded` error.
+- Host JARs are ABI inputs. They must come from the exact target APK/build; a successful compile
+  against another AyuGram/exteraGram build is not compatibility proof.
+- A development build is not testable if nobody can identify/download the exact `.eaf` that CI
+  built. Publish the exact artifact and correlate device reports to the exact branch/head/run.
+
+For symptoms, causes and regression checks behind these rules, read
+`references/13-field-failure-playbook.md`.
 
 ## Template invariants
 
@@ -86,6 +123,7 @@ report it as a release blocker rather than silently copying the value.
 | `just`, GitHub Actions, releases and provenance | `references/10-build-ci-release.md` |
 | Common implementation procedures | `references/11-recipes.md` |
 | Known traps, version conflicts, migration hazards | `references/12-pitfalls-compatibility.md` |
+| Recognize field-proven EAF/DEX/JVM failure patterns | `references/13-field-failure-playbook.md` |
 | Upstream material and license notes | `references/SOURCES.md` |
 
 ## Layer selection
@@ -117,6 +155,11 @@ at least one level above it. For example, a packager change should be checked bo
 as ZIP contents and via CI; a hook change should be checked for reflection resolution
 and on-device behavior.
 
+When a real bug is fixed, add a regression assertion for the external contract that failed.
+Do not rely on the implementation itself as the only proof. Examples include explicit ZIP
+directory entries, final-DEX type-surface validation, metadata synchronization and exact
+artifact publication.
+
 ## Rules against hallucinated API
 
 - Do not invent `BasePlugin` methods from names that sound plausible.
@@ -137,10 +180,13 @@ completion should include the relevant subset of:
 
 - Python syntax/static checks;
 - deterministic EAF smoke build;
-- archive path/integrity/content assertions;
+- archive path/integrity/content assertions, including explicit declared directory entries;
 - real Gradle → DEX build when host JARs are present;
+- final release DEX runtime-surface validation for standalone/shaded DEX changes;
 - exact bridge/reflection signature validation;
 - cleanup/reload verification;
 - device install/enable/disable/reload test;
+- one real Python → JVM callback for bridge/runtime changes;
 - regression check for legacy `just embed` if compatibility is still promised;
+- exact artifact/head/run identification for device-tested builds;
 - updated documentation/skill notes when architecture or workflow changed.
