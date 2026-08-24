@@ -2,9 +2,9 @@ RELEASE_DEX_PATH := `realpath -m build/outputs/dex/release/classes.dex`
 DEBUG_DEX_PATH := `realpath -m build/outputs/dex/debug/classes.dex`
 
 PLUGIN_PY := `grep -ls '^__id__ = ' -- *.py | head -n1`
-PLUGIN_ID := `grep -h '^__id__ = ' -- *.py | head -n1 | sed -n 's/^__id__ = "\(.*\)"$/\1/p'`
+EAF_PLUGIN_ID := `sed -n 's/^id: *//p' metainfo.yml | head -n1`
 DIST_PY := "dist/" + file_name(PLUGIN_PY)
-DIST_EAF := "dist/" + PLUGIN_ID + ".eaf"
+DIST_EAF := "dist/" + EAF_PLUGIN_ID + ".eaf"
 
 # fail early if the tools a recipe needs are not installed
 [private]
@@ -108,8 +108,10 @@ init NEW_PACKAGE NEW_ID NEW_NAME: (_require "uv")
         exit 1
     fi
 
-    if ! [[ "$new_id" =~ ^[A-Za-z][A-Za-z0-9_-]{1,31}$ ]]; then
-        echo "invalid plugin id: $new_id (2-32 chars; start with a letter; use letters, digits, _ or -)" >&2
+    # Intersection of legacy BasePlugin and structured Elyx id rules:
+    # 2-32 chars, start with a letter, then letters/digits/underscore only.
+    if ! [[ "$new_id" =~ ^[A-Za-z][A-Za-z0-9_]{1,31}$ ]]; then
+        echo "invalid plugin id: $new_id (2-32 chars; start with a letter; use letters, digits, _)" >&2
         exit 1
     fi
 
@@ -117,9 +119,10 @@ init NEW_PACKAGE NEW_ID NEW_NAME: (_require "uv")
     old_package=$(sed -n 's/^ *namespace = "\(.*\)"$/\1/p' build.gradle.kts)
     old_py=$(grep -ls '^__id__ = ' -- *.py | head -n1)
     old_id=$(sed -n 's/^__id__ = "\(.*\)"$/\1/p' "$old_py")
+    old_eaf_id=$(sed -n 's/^id: *//p' metainfo.yml | head -n1)
     old_name=$(sed -n 's/^rootProject.name = "\(.*\)"$/\1/p' settings.gradle.kts)
 
-    if [ -z "$old_package" ] || [ -z "$old_py" ] || [ -z "$old_id" ]; then
+    if [ -z "$old_package" ] || [ -z "$old_py" ] || [ -z "$old_id" ] || [ -z "$old_eaf_id" ]; then
         echo "failed to detect current plugin package/id" >&2
         exit 1
     fi
@@ -127,9 +130,10 @@ init NEW_PACKAGE NEW_ID NEW_NAME: (_require "uv")
     old_path="src/main/kotlin/${old_package//.//}"
     new_path="src/main/kotlin/${new_package//.//}"
 
-    echo "package: $old_package -> $new_package"
-    echo "id:      $old_id -> $new_id"
-    echo "name:    $old_name -> $new_name"
+    echo "package:   $old_package -> $new_package"
+    echo "legacy id: $old_id -> $new_id"
+    echo "EAF id:    $old_eaf_id -> $new_id"
+    echo "name:      $old_name -> $new_name"
 
     # move the Kotlin sources into the new package folder
     if [ "$old_path" != "$new_path" ]; then
@@ -144,7 +148,7 @@ init NEW_PACKAGE NEW_ID NEW_NAME: (_require "uv")
     fi
 
     # package references, both dotted (Kotlin) and slashed (relocation/proguard config)
-    files=(build.gradle.kts proguard-rules.pro metainfo.yml "$old_py")
+    files=(build.gradle.kts proguard-rules.pro "$old_py")
     while IFS= read -r -d '' file; do
         files+=("$file")
     done < <(find src -name '*.kt' -print0)
@@ -155,8 +159,10 @@ init NEW_PACKAGE NEW_ID NEW_NAME: (_require "uv")
         -e "s|${old_id}|${new_id}|g" \
         "${files[@]}"
 
-    # plugin metadata shared by legacy and EAF builds
+    # Keep legacy Python metadata and structured Elyx metadata synchronized.
+    sed -i "s|^__id__ = \".*\"$|__id__ = \"${new_id}\"|" "$old_py"
     sed -i "s|^__name__ = \".*\"$|__name__ = \"${new_name}\"|" "$old_py"
+    sed -i "s|^id: .*|id: ${new_id}|" metainfo.yml
     sed -i "s|^name: .*|name: ${new_name}|" metainfo.yml
     sed -i "s|^rootProject.name = \".*\"$|rootProject.name = \"${new_name}\"|" settings.gradle.kts
     sed -i "s|^name = \".*\"$|name = \"${new_id}\"|" pyproject.toml

@@ -28,15 +28,18 @@ jobs:
           python -m py_compile tools/embed_dex.py tools/build_eaf.py scripts/prepare_release.py
           python -m compileall -q plugin_src
 
-      - name: Resolve plugin source
+      - name: Resolve plugin identities
         id: plugin
         run: |
           plugin_py="$(grep -ls '^__id__ = ' -- *.py | head -n1)"
-          plugin_id="$(sed -n 's/^__id__ = "\(.*\)"$/\1/p' "$plugin_py")"
+          legacy_id="$(sed -n 's/^__id__ = "\(.*\)"$/\1/p' "$plugin_py")"
+          eaf_id="$(sed -n 's/^id: *//p' metainfo.yml | head -n1)"
           test -n "$plugin_py"
-          test -n "$plugin_id"
+          test -n "$legacy_id"
+          test -n "$eaf_id"
           echo "file=$plugin_py" >> "$GITHUB_OUTPUT"
-          echo "id=$plugin_id" >> "$GITHUB_OUTPUT"
+          echo "legacy_id=$legacy_id" >> "$GITHUB_OUTPUT"
+          echo "id=$eaf_id" >> "$GITHUB_OUTPUT"
 
       - name: Smoke-test EAF packaging
         env:
@@ -54,23 +57,44 @@ jobs:
             --asset-dir assets \
             --output "dist/${PLUGIN_ID}.eaf"
 
+      - name: Reject invalid Elyx id
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+        run: |
+          cp metainfo.yml build/ci/invalid-metainfo.yml
+          sed -i 's/^id: .*/id: invalid-id/' build/ci/invalid-metainfo.yml
+          if python tools/build_eaf.py \
+            --dex build/ci/classes.dex \
+            --plugin-file "$PLUGIN_PY" \
+            --refmap refmap.yml \
+            --metainfo build/ci/invalid-metainfo.yml \
+            --extra-source-dir plugin_src \
+            --asset-dir assets \
+            --output build/ci/invalid.eaf; then
+              echo "builder unexpectedly accepted an Elyx id containing '-'" >&2
+              exit 1
+          fi
+          test ! -e build/ci/invalid.eaf
+
       - name: Verify binary DEX archive layout
         env:
           PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
         run: |
           python - <<'PY'
           import os
           from pathlib import Path
           from zipfile import ZipFile
 
+          expected_archive = Path("dist") / f"{os.environ['PLUGIN_ID']}.eaf"
           archives = list(Path("dist").glob("*.eaf"))
-          if len(archives) != 1:
-              raise SystemExit(f"expected one EAF, found: {archives}")
+          if archives != [expected_archive]:
+              raise SystemExit(f"unexpected EAF outputs: {archives}")
 
           expected_dex = Path("build/ci/classes.dex").read_bytes()
           expected_main = Path(os.environ["PLUGIN_PY"]).read_bytes()
 
-          with ZipFile(archives[0]) as archive:
+          with ZipFile(expected_archive) as archive:
               names = set(archive.namelist())
               required = {
                   "refmap.yml",
@@ -99,10 +123,15 @@ jobs:
               if "assets: assets" not in refmap:
                   raise SystemExit("refmap does not declare the assets directory")
 
+              metainfo = archive.read("metainfo.yml").decode("utf-8")
+              expected_id_line = f"id: {os.environ['PLUGIN_ID']}"
+              if expected_id_line not in metainfo.splitlines():
+                  raise SystemExit("packaged metainfo does not contain the canonical Elyx id")
+
               if archive.testzip() is not None:
                   raise SystemExit("archive integrity check failed")
 
-          print(archives[0])
+          print(expected_archive)
           PY
 
       - name: Detect host JARs
