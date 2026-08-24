@@ -46,7 +46,7 @@ typealias LogReceiver = ValueCallback<String>
 class Plugin private constructor() {
     @Suppress("unused")
     companion object {
-        const val ID = "exteragram-plugin-template"
+        const val ID = "exteragram_plugin_template"
 
         private const val HANDLE_KEY = "ru.n08i40k.template.handle"
 
