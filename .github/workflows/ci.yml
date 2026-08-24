@@ -186,3 +186,13 @@ jobs:
             --extra-source-dir plugin_src \
             --asset-dir assets \
             --output "dist/${PLUGIN_ID}.eaf"
+
+      - name: Upload installable EAF
+        if: steps.host-jars.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.plugin.outputs.id }}-${{ github.sha }}
+          path: dist/${{ steps.plugin.outputs.id }}.eaf
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
