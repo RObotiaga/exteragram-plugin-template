@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -21,6 +22,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 DEFAULT_EXTRA_SOURCE_DIR = Path("plugin_src")
 DEFAULT_ASSET_DIR = Path("assets")
 DEX_ARCHIVE_PATH = "assets/classes.dex"
+ELYX_ID_RE = re.compile(r"^[A-Za-z0-9_]{2,32}$")
 
 
 def _validated_python(path: Path, source: str) -> None:
@@ -28,6 +30,39 @@ def _validated_python(path: Path, source: str) -> None:
         ast.parse(source, filename=str(path))
     except SyntaxError as exc:
         raise RuntimeError(f"Invalid Python source: {path}: {exc}") from exc
+
+
+def _read_elyx_id(path: Path, data: bytes) -> str:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"metainfo is not valid UTF-8: {path}") from exc
+
+    values: list[str] = []
+    for raw_line in text.splitlines():
+        if not raw_line.startswith("id:"):
+            continue
+
+        value = raw_line.partition(":")[2].strip()
+        if " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        values.append(value)
+
+    if len(values) != 1:
+        raise RuntimeError(
+            f"metainfo must contain exactly one top-level id field: {path}"
+        )
+
+    plugin_id = values[0]
+    if not ELYX_ID_RE.fullmatch(plugin_id):
+        raise RuntimeError(
+            "invalid Elyx plugin id "
+            f"{plugin_id!r}: expected 2-32 ASCII letters, digits, or underscore"
+        )
+
+    return plugin_id
 
 
 def _iter_project_files(source_dir: Path):
@@ -93,6 +128,7 @@ def build_eaf(
         raise RuntimeError(f"refmap is empty: {refmap_path}")
     if not metainfo.strip():
         raise RuntimeError(f"metainfo is empty: {metainfo_path}")
+    elyx_id = _read_elyx_id(metainfo_path, metainfo)
 
     source_files: list[tuple[str, bytes]] = []
     for path in _iter_project_files(extra_source_dir) or ():
@@ -157,8 +193,9 @@ def build_eaf(
         tmp_path.unlink(missing_ok=True)
 
     print(
-        f"built {output_path} with binary {DEX_ARCHIVE_PATH} ({len(dex)} bytes), "
-        f"{len(source_files)} extra source file(s), and {len(asset_files)} extra asset(s)"
+        f"built {output_path} for Elyx id {elyx_id!r} with binary "
+        f"{DEX_ARCHIVE_PATH} ({len(dex)} bytes), {len(source_files)} extra source "
+        f"file(s), and {len(asset_files)} extra asset(s)"
     )
 
 
