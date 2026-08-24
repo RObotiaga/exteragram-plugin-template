@@ -119,6 +119,8 @@ Always report:
 ```text
 packaging smoke: pass/fail
 real Kotlin/DEX: pass/fail/skipped
+final-Dex runtime surface: pass/fail/skipped
+device runtime: pass/fail/not tested
 ```
 
 Never claim full integration from a synthetic-Dex-only run.
@@ -126,7 +128,7 @@ Never claim full integration from a synthetic-Dex-only run.
 ## 11. EAF smoke DEX is not a real DEX integration test
 
 A tiny synthetic payload with `dex\n` magic proves archive wiring, not class loading.
-A release requires real Gradle/D8 output and device validation for DEX changes.
+A release requires real Gradle/R8/D8 output and device validation for DEX changes.
 
 ## 12. Encoded DEX is legacy transport
 
@@ -140,14 +142,22 @@ Hex/base64 expansion:
 For this template's EAF path use binary `assets/classes.dex`. Keep encoded DEX only while a
 legacy single-file artifact is intentionally supported.
 
-## 13. Private Elyx install paths are runtime details
+## 13. `__file__` is not an Elyx contract
 
-Official docs describe an installed directory layout, but plugin code should prefer public
-`elyx` environment/assets APIs and normal imports.
+Do not use required bootstrap logic that assumes:
 
-The template may resolve `classes.dex` relative to `main.py` during bootstrap; treat that as a
-specific bridge implementation, not permission to hard-code global Elyx storage paths
-throughout the plugin.
+```python
+os.path.dirname(__file__)
+```
+
+Real AyuGram/Elyx validation showed that `main.py` may execute without `__file__`.
+
+Prefer the public `elyx.assets` facade. If an early bridge must resolve a filesystem path, use a
+documented/imported runtime helper and keep private install-layout knowledge centralized.
+`__file__` may be an optional candidate, never the only required path.
+
+Do not use `globals().get("get_plugins_dir")` as a fallback unless that symbol is actually
+imported/defined.
 
 ## 14. Asset tree is read-only content
 
@@ -251,12 +261,18 @@ original synthesis, attribute sources, and copy code/text only when license and 
 Before reporting or merging, verify the CI run belongs to current head SHA. A green older run
 is not evidence for a newer commit.
 
+For pull-request workflows, distinguish the PR head SHA from GitHub's synthetic merge SHA when
+naming artifacts or correlating device reports.
+
 ## 29. Release artifact rebuilt after attestation
 
 If provenance attests one `.eaf` and release uploads a repacked/modified one, provenance no
 longer describes the published bytes.
 
 Attest the final validated artifact and do not modify it afterward.
+
+The same rule applies to device validation: do not use runtime success for artifact A as proof
+for a separately rebuilt artifact B.
 
 ## 30. Silent graceful degradation of required core
 
@@ -265,6 +281,92 @@ cannot silently fail while plugin claims to be loaded.
 
 Classify dependencies as required vs optional and make failure state explicit.
 
+If settings/menu callbacks require the JVM bridge, do not leave them registered after required
+bridge initialization fails.
+
+## 31. Child ZIP entry is not a directory entry
+
+This archive:
+
+```text
+assets/classes.dex
+```
+
+may still fail an installer expecting a real `assets/` directory entry.
+
+When `refmap` declares directories, emit explicit ZIP directory entries and verify directory
+semantics (`ZipInfo.is_dir()` or equivalent). The same applies to `src/` and other declared
+roots.
+
+## 32. Metadata surfaces drift independently
+
+It is easy for `pyproject.toml` to say `0.1.0` while Python/Elyx still show `0.0.0`, or for
+Python/JVM ids to retain a legacy hyphen while structured Elyx uses underscore.
+
+CI should compare supported id/version surfaces before Gradle. Author is not such an invariant:
+it must remain freely editable by forks.
+
+## 33. `JVM plugin is not loaded` is usually secondary
+
+This message means only that the bridge never established its JVM class reference. Search
+startup logs for the earlier DEX resolution/read, class-loader, linkage or inject failure.
+
+Do not fix the callback first unless every earlier stage is proven successful.
+
+## 34. Compile-only annotations can break standalone DEX linkage
+
+A compile-only annotation descriptor can survive into release DEX because of broad annotation
+attribute retention even when its class is absent at runtime.
+
+Example class of failure:
+
+```text
+Landroidx/annotation/AnyThread;
+```
+
+Validate final-Dex unresolved type surface. Do not solve it by blindly allowlisting the package
+or by globally suppressing R8 warnings.
+
+## 35. Relocation can invalidate dependency consumer rules
+
+Relocated libraries can carry `META-INF` ProGuard/R8 rules written for original package names.
+These may become unmatched/stale after shading.
+
+Strip stale packaged rules when appropriate, but translate semantically required rules to the
+relocated namespace rather than simply deleting them. Coroutine volatile-field rules are a
+concrete example of semantics that must survive relocation.
+
+## 36. dex2jar synthetic descriptor mismatch
+
+A dex2jar-produced host JAR may contain `Foo_IA.class` while a descriptor still references
+`Foo-IA`.
+
+Normalize only when the exact sanitized candidate exists. Global hyphen replacement can corrupt
+legitimate names.
+
+## 37. Broad R8 suppression hides runtime failures
+
+Global `-ignorewarnings` can turn missing runtime dependencies and stale shrinker rules into a
+green build that fails on device.
+
+Prefer strict diagnostics, exact classpath repair, relocation fixes, narrow `-dontwarn` for
+proven compile-time markers, and final-Dex runtime-surface validation.
+
+## 38. Development artifact does not exist for testers
+
+A manual Release workflow may never have been dispatched, while a green CI may build an EAF
+without uploading it. That leaves no exact artifact to install.
+
+Full development CI should publish the installable `.eaf` when device testing is expected, and
+the runtime report should identify the exact run/head/artifact.
+
+## 39. Secret pasted into workflow/repository
+
+Build delivery integrations must use Actions/environment secrets. Do not embed bot tokens or
+other credentials in YAML, source or release scripts.
+
+Untrusted PRs must not receive deployment secrets. Rotate a token after accidental exposure.
+
 ## Compatibility review questions
 
 Before supporting a second host version ask:
@@ -272,8 +374,9 @@ Before supporting a second host version ask:
 - Which public SDK behavior differs?
 - Which Telegram classes/methods differ?
 - Which bridge signatures differ?
+- Which host classes are expected to be supplied to the standalone DEX at runtime?
 - Can differences be probed safely at runtime?
 - Is branching complexity cheaper than raising minimum version?
-- Do both variants have device tests?
+- Do both variants have real-Dex and device tests?
 
 Avoid accumulating untested fallback signatures indefinitely.

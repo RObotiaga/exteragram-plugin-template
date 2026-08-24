@@ -46,6 +46,11 @@ Why exact-version host JARs matter:
 
 Do not download a random `Telegram.jar` and treat it as interchangeable.
 
+Generated host JAR storage is a repository concern, but the bytes are an ABI input. Git LFS is
+only useful when the actual fork and CI can restore its objects reliably. Whatever storage
+strategy is chosen, CI must prove the real non-pointer JAR bytes are present before calling a
+run a full DEX build.
+
 ## Updating the host baseline
 
 When moving to a new target APK:
@@ -74,6 +79,84 @@ The packager/CI should verify at minimum:
 A synthetic DEX smoke payload can test archive plumbing, but it does not replace a real D8
 build and runtime class-load test.
 
+## Final DEX runtime type surface
+
+Compilation and R8 success do not prove that a standalone plugin DEX can link on ART. The final
+DEX can retain descriptors for classes that existed only on the compile classpath.
+
+A concrete failure class is a compile-only annotation such as:
+
+```text
+Landroidx/annotation/AnyThread;
+```
+
+remaining in the release DEX even though that annotation class is not bundled and is not
+provided by the host loader.
+
+Validate the **final release DEX** after R8/D8:
+
+1. enumerate classes defined in the DEX;
+2. enumerate referenced type descriptors;
+3. subtract defined types;
+4. allow only known runtime providers (Android/Java and exact host-provided Telegram/extera/
+   hook APIs);
+5. fail on unexpected compile-only or missing-runtime packages.
+
+Do not expand the allowlist automatically. Determine whether each unresolved type is intended
+host API, leaked compile-only metadata, missing embedded dependency, or relocation bug.
+
+## Annotation retention in standalone DEX
+
+Broad rules such as:
+
+```proguard
+-keepattributes *Annotation*
+```
+
+can preserve runtime-invisible/CLASS-retention annotations that are useful only to tools.
+Those descriptors can become runtime linkage liabilities in an independently loaded DEX.
+
+Keep only annotation attributes genuinely required at runtime, or explicitly strip known
+compile-time marker metadata. Re-run final-Dex runtime-surface validation after changing
+retention.
+
+## R8 and relocation discipline
+
+### No broad warning suppression
+
+Do not use broad `-ignorewarnings` to get a green build. Missing classes and unmatched rules
+must be understood by cause. A narrow `-dontwarn` is acceptable only for a class proven to be
+an irrelevant compile-time marker.
+
+### Consumer rules can become stale after relocation
+
+Dependency JARs may contain R8/ProGuard consumer resources written for their original package
+names. Once classes are relocated, blindly copying those resources can produce unmatched rules
+or preserve the wrong things.
+
+Strip stale packaged rules from relocated program inputs when appropriate, but preserve their
+semantics when they are required. For example, kotlinx-coroutines rules that retain volatile
+fields used by field updaters must be translated to the relocated coroutine namespace rather
+than discarded. The same applies to relocated `SafeContinuation` volatile fields.
+
+### Original dependencies can still belong on the R8 classpath
+
+Embedded dependencies may be relocated as program input while their original JARs remain on
+R8's classpath to resolve original/unrelocated signatures. If R8 reports a basic type such as
+`kotlin.Unit` missing after shading, inspect classpath construction before adding keep rules.
+
+### dex2jar synthetic class descriptors need precise normalization
+
+A dex2jar host JAR can contain a class file like `Foo_IA.class` while another descriptor still
+references `Foo-IA`. Normalize to the sanitized underscore name only when that exact candidate
+class is known to exist. Do not globally rewrite all hyphens.
+
+### Strict diagnostics should be machine-gated
+
+If the repository intentionally treats R8 `Warning:` or unmatched ProGuard-rule diagnostics as
+errors, keep that gate explicit in the build/CI. A warning-free run should be meaningful, not
+the result of global suppression.
+
 ## Class loading
 
 The template uses a Python bridge to load a JVM entry class. `InMemoryDexClassLoader` is useful
@@ -93,6 +176,9 @@ read DEX bytes
 Use the host/application class loader as the parent unless a tested architecture requires
 another loader. Class-loader choice affects resolution of Telegram, Android, Xposed and plugin
 classes.
+
+Do not change the parent loader to compensate for an unrelated packaging or missing-dependency
+bug. First prove which type is missing and which loader/input is supposed to provide it.
 
 Do not cache a class or class loader across plugin generations unless lifecycle semantics are
 explicitly designed for it.
@@ -120,6 +206,9 @@ Advantages of a narrow facade:
 - lifecycle cleanup has one obvious owner;
 - errors can be wrapped/logged consistently.
 
+Keep the entry class name stable through shrinking/relocation or explicitly keep it. Confirm it
+exists in the final DEX before blaming the class loader.
+
 ## Exact reflection types
 
 Python reflection into JVM methods must specify Java parameter types exactly where required.
@@ -128,6 +217,27 @@ A Python `int` is not a sufficient description of whether Java expects `int`, `l
 
 When changing a bridge signature, change and review both sides in one patch. Add a smoke check
 or explicit source assertion when feasible.
+
+## Core bridge failure semantics
+
+Treat these as distinct startup failures:
+
+```text
+DEX asset missing/read failure
+invalid DEX magic
+class loader construction failure
+entry class not found/linkage failure
+bridge method lookup mismatch
+inject exception
+finalize/hook exception
+```
+
+Preserve the earliest exception. `JVM plugin is not loaded` is usually a later consequence,
+not a sufficient root-cause report.
+
+If the JVM backend is required for registered UI/actions, do not leave those actions active
+after bridge load failure. Fail initialization explicitly or degrade only features proven to
+be optional.
 
 ## Hooks in Kotlin/DEX
 
@@ -188,6 +298,7 @@ For startup, distinguish:
 
 - DEX missing/corrupt;
 - class not found;
+- missing runtime dependency / `NoClassDefFoundError`;
 - bridge method not found/signature mismatch;
 - hook target missing;
 - hook callback exception;
@@ -223,10 +334,14 @@ DEX build and device validation.
 - Release/debug DEX path correct?
 - DEX magic/content validated?
 - EAF contains binary DEX once?
-- Bridge class name stable/correct?
+- Final DEX external/runtime type surface validated?
+- Compile-only annotations absent unless intentionally runtime-provided?
+- R8 warnings strict rather than globally suppressed?
+- Relocated dependency rules translated where semantically required?
+- Bridge class name stable/correct and present in final DEX?
 - Exact Java method signatures synchronized?
 - Hook targets verified against target host?
 - No blocking work in hot hooks?
 - Unhook/eject implemented?
 - Static/callback references cleared?
-- Real device class-load test performed for release-critical changes?
+- Real device class-load and Python → JVM callback test performed for release-critical changes?

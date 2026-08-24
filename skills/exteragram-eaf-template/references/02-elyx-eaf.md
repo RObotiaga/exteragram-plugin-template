@@ -33,6 +33,11 @@ plugin.eaf
     └── main.py
 ```
 
+For strict installers, directory names in this diagram are not merely conceptual. If refmap
+or the layout declares `assets`/`src`, emit actual ZIP directory entries (`assets/`, `src/`)
+in addition to their children. A child such as `assets/classes.dex` does not guarantee that a
+strict ZIP consumer sees a real `assets/` directory entry.
+
 ## `refmap.yml`
 
 Use YAML unless the project has a reason to choose another supported format.
@@ -59,6 +64,10 @@ wheels: wheels
 
 Every explicitly declared directory/path must exist in the produced archive. When changing
 paths, update the builder, tests and `refmap` together.
+
+For declared directories, validate both the path and directory semantics where the installer
+is strict. Regression checks should be able to distinguish `assets/` from merely having an
+`assets/foo` child.
 
 ## `metainfo.yml`
 
@@ -89,6 +98,14 @@ into one regex while dual-format compatibility exists.
 
 Quote version/constraint values in YAML.
 
+When the template still carries legacy Python metadata and JVM static identity, treat identity
+as a synchronized contract. `metainfo.id`, Python `__id__`, JVM `Plugin.ID`/equivalent and
+artifact naming should not drift accidentally.
+
+Version surfaces should also agree while they are all supported. By contrast, author is
+plugin-owned metadata: provide a template default if desired, but do not make a particular
+template author a CI invariant.
+
 ## Entry module
 
 `main` points to the Python entry module. It must expose at least one `BasePlugin` subclass.
@@ -97,6 +114,9 @@ class and put helpers elsewhere.
 
 Avoid large side effects at module import. Persistent resources belong in
 `on_plugin_load`/`on_plugin_unload` ownership.
+
+Do not assume the Elyx runtime defines Python `__file__` for `main.py`. Required bootstrap
+logic must be able to operate without it.
 
 ## Local modules and isolation
 
@@ -136,7 +156,7 @@ Do not shadow SDK/Java/stdlib roots such as:
 
 ## Assets
 
-Declare/discover an asset root and use the public plugin-bound facade:
+Declare/discover an asset root and prefer the public plugin-bound facade:
 
 ```python
 from elyx import assets
@@ -154,7 +174,12 @@ For this template:
 - `assets/classes.dex` is generated during packaging;
 - the EAF builder must ensure the DEX bytes are exactly the selected input;
 - project assets may also be copied under `assets/`;
-- a source file must not silently overwrite generated `classes.dex`.
+- a source file must not silently overwrite generated `classes.dex`;
+- required DEX loading must not rely solely on `__file__`.
+
+If an early bootstrap path cannot use the asset facade, use a documented/imported runtime
+helper deliberately and centralize private install-layout knowledge in the bridge. Do not use
+an unimported `globals().get("get_plugins_dir")` as a pretend fallback.
 
 ## Strings/localization
 
@@ -211,9 +236,13 @@ A good builder should verify:
 - no absolute/traversal paths;
 - no duplicate archive entries;
 - required `refmap` paths resolve;
+- declared directories exist as explicit directory entries when required by the installer;
 - `assets/classes.dex` has DEX magic and matches build input;
 - ZIP integrity succeeds;
 - repeated builds with identical inputs are deterministic where practical.
+
+When writing directory entries manually, set directory semantics consistently (for example
+Unix directory mode and/or DOS directory bit) rather than only appending `/` to a filename.
 
 ## Structured live reload
 
@@ -251,9 +280,11 @@ Before publishing:
 
 - inspect archive root;
 - install from the clean archive, not only live reload;
-- verify id/version constraints;
+- verify id/version constraints and synchronization surfaces;
 - verify all declared `refmap` paths;
+- verify explicit directory entries required by the installer;
 - verify `assets/classes.dex` is binary and correct;
+- verify required asset bootstrap works without assuming `__file__`;
 - test enable → disable → enable;
 - test reload after Python change;
 - test update from previous version when relevant;
