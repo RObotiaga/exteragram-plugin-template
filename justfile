@@ -46,6 +46,7 @@ eaf DEX_PATH=RELEASE_DEX_PATH OUTPUT=DIST_EAF: (_require "uv")
         --refmap refmap.yml \
         --metainfo metainfo.yml \
         --extra-source-dir plugin_src \
+        --asset-dir assets \
         --output '{{ OUTPUT }}'
 
 # full release build: Kotlin -> DEX -> EAF
