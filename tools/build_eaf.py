@@ -16,7 +16,7 @@ import argparse
 import ast
 import re
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
 
 
 DEFAULT_EXTRA_SOURCE_DIR = Path("plugin_src")
@@ -89,13 +89,46 @@ def _iter_asset_files(asset_dir: Path):
         yield path
 
 
-def _writestr(zip_file: ZipFile, archive_path: str, data: bytes) -> None:
+def _new_zip_info(
+    archive_path: str,
+    *,
+    mode: int,
+    compress_type: int,
+    directory: bool = False,
+) -> ZipInfo:
+    if directory:
+        archive_path = archive_path.rstrip("/") + "/"
+
     info = ZipInfo(archive_path)
-    # Fixed timestamp makes archives reproducible for identical inputs.
+    # Fixed timestamp and mode make archives reproducible for identical inputs.
     info.date_time = (1980, 1, 1, 0, 0, 0)
-    info.compress_type = ZIP_DEFLATED
-    info.external_attr = 0o100644 << 16
+    info.compress_type = compress_type
+    info.create_system = 3  # Unix, so external_attr mode bits are meaningful.
+    info.external_attr = mode << 16
+    if directory:
+        # DOS directory bit helps ZIP consumers which do not inspect Unix mode.
+        info.external_attr |= 0x10
+    return info
+
+
+def _writestr(zip_file: ZipFile, archive_path: str, data: bytes) -> None:
+    info = _new_zip_info(
+        archive_path,
+        mode=0o100644,
+        compress_type=ZIP_DEFLATED,
+    )
     zip_file.writestr(info, data)
+
+
+def _writedir(zip_file: ZipFile, archive_path: str) -> None:
+    """Write a real ZIP directory entry required by strict Elyx installers."""
+    info = _new_zip_info(
+        archive_path,
+        mode=0o40755,
+        compress_type=ZIP_STORED,
+        directory=True,
+    )
+    zip_file.writestr(info, b"")
 
 
 def build_eaf(
@@ -159,6 +192,13 @@ def build_eaf(
             _writestr(archive, "refmap.yml", refmap)
             _writestr(archive, "metainfo.yml", metainfo)
             _writestr(archive, "main.py", plugin_source.encode("utf-8"))
+
+            # Elyx may validate directories declared by refmap using exact ZIP
+            # directory entries. A child such as assets/classes.dex does not make
+            # an "assets/" ZipInfo entry exist, so emit roots explicitly.
+            _writedir(archive, "src")
+            _writedir(archive, "assets")
+
             for archive_path, data in source_files:
                 _writestr(archive, archive_path, data)
             for archive_path, data in asset_files:
@@ -174,6 +214,8 @@ def build_eaf(
                 "refmap.yml",
                 "metainfo.yml",
                 "main.py",
+                "src/",
+                "assets/",
                 DEX_ARCHIVE_PATH,
             }
             missing_entries = sorted(required_entries - set(names))
@@ -181,6 +223,13 @@ def build_eaf(
                 raise RuntimeError(
                     "Built EAF is missing required entries: " + ", ".join(missing_entries)
                 )
+
+            for directory in ("src/", "assets/"):
+                if not archive.getinfo(directory).is_dir():
+                    raise RuntimeError(
+                        f"Built EAF entry {directory!r} is not a ZIP directory"
+                    )
+
             if any(name.startswith("/") or ".." in Path(name).parts for name in names):
                 raise RuntimeError("Built EAF contains unsafe archive paths")
             if archive.read(DEX_ARCHIVE_PATH) != dex:
