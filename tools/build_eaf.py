@@ -2,9 +2,9 @@
 """Build a structured Elyx/EAF archive from the template sources.
 
 The canonical plugin entry point remains a normal Python source file in the
-repository. During packaging we embed the release DEX into a temporary copy of
-that source, store it as ``main.py`` in the archive, and add any extra Python
-modules from ``plugin_src/`` as the ``src`` package.
+repository. During packaging it is stored unchanged as ``main.py``. The release
+DEX is stored as a real binary asset at ``assets/classes.dex`` and additional
+Python modules from ``plugin_src/`` are added as the ``src`` package.
 
 The resulting file is a regular ZIP archive with an ``.eaf`` extension and
 ``refmap.yml`` at its root, as expected by Elyx.
@@ -17,10 +17,10 @@ import ast
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-from embed_dex import embed_source
-
 
 DEFAULT_EXTRA_SOURCE_DIR = Path("plugin_src")
+DEFAULT_ASSET_DIR = Path("assets")
+DEX_ARCHIVE_PATH = "assets/classes.dex"
 
 
 def _validated_python(path: Path, source: str) -> None:
@@ -30,7 +30,7 @@ def _validated_python(path: Path, source: str) -> None:
         raise RuntimeError(f"Invalid Python source: {path}: {exc}") from exc
 
 
-def _iter_extra_sources(source_dir: Path):
+def _iter_project_files(source_dir: Path):
     if not source_dir.exists():
         return
 
@@ -38,6 +38,18 @@ def _iter_extra_sources(source_dir: Path):
         if path.is_dir() or "__pycache__" in path.parts:
             continue
         if path.suffix in {".pyc", ".pyo"}:
+            continue
+        yield path
+
+
+def _iter_asset_files(asset_dir: Path):
+    if not asset_dir.exists():
+        return
+
+    for path in sorted(asset_dir.rglob("*")):
+        if path.is_dir() or "__pycache__" in path.parts:
+            continue
+        if path.name == ".DS_Store":
             continue
         yield path
 
@@ -58,6 +70,7 @@ def build_eaf(
     refmap_path: Path,
     metainfo_path: Path,
     extra_source_dir: Path,
+    asset_dir: Path,
     output_path: Path,
 ) -> None:
     required_files = (dex_path, plugin_path, refmap_path, metainfo_path)
@@ -68,11 +81,11 @@ def build_eaf(
     dex = dex_path.read_bytes()
     if not dex:
         raise RuntimeError(f"DEX is empty: {dex_path}")
+    if not dex.startswith(b"dex\n"):
+        raise RuntimeError(f"DEX has an invalid magic header: {dex_path}")
 
     plugin_source = plugin_path.read_text(encoding="utf-8")
     _validated_python(plugin_path, plugin_source)
-    embedded_main = embed_source(plugin_source, dex)
-    _validated_python(Path("main.py"), embedded_main)
 
     refmap = refmap_path.read_bytes()
     metainfo = metainfo_path.read_bytes()
@@ -81,14 +94,25 @@ def build_eaf(
     if not metainfo.strip():
         raise RuntimeError(f"metainfo is empty: {metainfo_path}")
 
-    extra_files: list[tuple[str, bytes]] = []
-    for path in _iter_extra_sources(extra_source_dir) or ():
+    source_files: list[tuple[str, bytes]] = []
+    for path in _iter_project_files(extra_source_dir) or ():
         relative = path.relative_to(extra_source_dir).as_posix()
         archive_path = f"src/{relative}"
         data = path.read_bytes()
         if path.suffix == ".py":
             _validated_python(path, data.decode("utf-8"))
-        extra_files.append((archive_path, data))
+        source_files.append((archive_path, data))
+
+    asset_files: list[tuple[str, bytes]] = []
+    for path in _iter_asset_files(asset_dir) or ():
+        relative = path.relative_to(asset_dir).as_posix()
+        archive_path = f"assets/{relative}"
+        if archive_path == DEX_ARCHIVE_PATH:
+            raise RuntimeError(
+                f"{asset_dir / 'classes.dex'} conflicts with generated {DEX_ARCHIVE_PATH}; "
+                "the release DEX must come from --dex"
+            )
+        asset_files.append((archive_path, path.read_bytes()))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
@@ -98,20 +122,33 @@ def build_eaf(
         with ZipFile(tmp_path, "w") as archive:
             _writestr(archive, "refmap.yml", refmap)
             _writestr(archive, "metainfo.yml", metainfo)
-            _writestr(archive, "main.py", embedded_main.encode("utf-8"))
-            for archive_path, data in extra_files:
+            _writestr(archive, "main.py", plugin_source.encode("utf-8"))
+            for archive_path, data in source_files:
                 _writestr(archive, archive_path, data)
+            for archive_path, data in asset_files:
+                _writestr(archive, archive_path, data)
+            _writestr(archive, DEX_ARCHIVE_PATH, dex)
 
         with ZipFile(tmp_path, "r") as archive:
-            names = set(archive.namelist())
-            required_entries = {"refmap.yml", "metainfo.yml", "main.py"}
-            missing_entries = sorted(required_entries - names)
+            names = archive.namelist()
+            if len(names) != len(set(names)):
+                raise RuntimeError("Built EAF contains duplicate archive paths")
+
+            required_entries = {
+                "refmap.yml",
+                "metainfo.yml",
+                "main.py",
+                DEX_ARCHIVE_PATH,
+            }
+            missing_entries = sorted(required_entries - set(names))
             if missing_entries:
                 raise RuntimeError(
                     "Built EAF is missing required entries: " + ", ".join(missing_entries)
                 )
-            if any(name.startswith("/") for name in names):
-                raise RuntimeError("Built EAF contains absolute archive paths")
+            if any(name.startswith("/") or ".." in Path(name).parts for name in names):
+                raise RuntimeError("Built EAF contains unsafe archive paths")
+            if archive.read(DEX_ARCHIVE_PATH) != dex:
+                raise RuntimeError("Packaged DEX does not match the release DEX")
             if archive.testzip() is not None:
                 raise RuntimeError("Built EAF failed ZIP integrity validation")
 
@@ -120,8 +157,8 @@ def build_eaf(
         tmp_path.unlink(missing_ok=True)
 
     print(
-        f"built {output_path} with {len(dex)} DEX bytes and "
-        f"{len(extra_files)} extra source file(s)"
+        f"built {output_path} with binary {DEX_ARCHIVE_PATH} ({len(dex)} bytes), "
+        f"{len(source_files)} extra source file(s), and {len(asset_files)} extra asset(s)"
     )
 
 
@@ -134,6 +171,7 @@ def main() -> int:
     parser.add_argument(
         "--extra-source-dir", default=DEFAULT_EXTRA_SOURCE_DIR, type=Path
     )
+    parser.add_argument("--asset-dir", default=DEFAULT_ASSET_DIR, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -144,6 +182,7 @@ def main() -> int:
             refmap_path=args.refmap,
             metainfo_path=args.metainfo,
             extra_source_dir=args.extra_source_dir,
+            asset_dir=args.asset_dir,
             output_path=args.output,
         )
     except (OSError, UnicodeError, RuntimeError, ValueError) as exc:
