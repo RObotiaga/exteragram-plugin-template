@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  eaf-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Ensure Telegram JARs exist
+        run: |
+          for jar in libs/Telegram.jar libs/Telegram-compile.jar; do
+            if [[ ! -s "$jar" ]]; then
+              echo "$jar is missing or Git LFS was not restored" >&2
+              exit 1
+            fi
+          done
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "build-tools;36.1.0" "platforms;android-36.1"
+          printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Validate Python tooling
+        run: |
+          python -m py_compile tools/embed_dex.py tools/build_eaf.py scripts/prepare_release.py
+          python -m compileall -q plugin_src
+
+      - name: Build release DEX
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" buildDexRelease
+
+      - name: Build EAF
+        run: |
+          plugin_py="$(grep -ls '^__id__ = ' -- *.py | head -n1)"
+          plugin_id="$(sed -n 's/^__id__ = "\(.*\)"$/\1/p' "$plugin_py")"
+          python tools/build_eaf.py \
+            --dex build/outputs/dex/release/classes.dex \
+            --plugin-file "$plugin_py" \
+            --refmap refmap.yml \
+            --metainfo metainfo.yml \
+            --extra-source-dir plugin_src \
+            --output "dist/${plugin_id}.eaf"
+
+      - name: Verify archive layout
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          archives = list(Path("dist").glob("*.eaf"))
+          if len(archives) != 1:
+              raise SystemExit(f"expected one EAF, found: {archives}")
+          with ZipFile(archives[0]) as archive:
+              names = set(archive.namelist())
+              required = {"refmap.yml", "metainfo.yml", "main.py", "src/__init__.py"}
+              missing = required - names
+              if missing:
+                  raise SystemExit(f"missing archive entries: {sorted(missing)}")
+              if archive.testzip() is not None:
+                  raise SystemExit("archive integrity check failed")
+          print(archives[0])
+          PY
