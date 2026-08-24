@@ -41,6 +41,57 @@ jobs:
           echo "legacy_id=$legacy_id" >> "$GITHUB_OUTPUT"
           echo "id=$eaf_id" >> "$GITHUB_OUTPUT"
 
+      - name: Validate synchronized plugin metadata
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          plugin_text = Path(os.environ["PLUGIN_PY"]).read_text(encoding="utf-8")
+          metainfo_text = Path("metainfo.yml").read_text(encoding="utf-8")
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+          def python_value(name: str) -> str:
+              match = re.search(rf'^{re.escape(name)} = "([^"]*)"$', plugin_text, re.MULTILINE)
+              if match is None:
+                  raise SystemExit(f"missing Python metadata field {name}")
+              return match.group(1)
+
+          def metainfo_value(name: str) -> str:
+              match = re.search(rf'^{re.escape(name)}:\s*(.+?)\s*$', metainfo_text, re.MULTILINE)
+              if match is None:
+                  raise SystemExit(f"missing Elyx metadata field {name}")
+              value = match.group(1).strip()
+              if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                  value = value[1:-1]
+              return value
+
+          python_id = python_value("__id__")
+          eaf_id = metainfo_value("id")
+          if python_id != eaf_id or eaf_id != os.environ["PLUGIN_ID"]:
+              raise SystemExit(
+                  f"plugin id mismatch: Python={python_id!r}, Elyx={eaf_id!r}, resolved={os.environ['PLUGIN_ID']!r}"
+              )
+
+          python_version = python_value("__version__")
+          eaf_version = metainfo_value("version")
+          project_version = str(pyproject["project"]["version"])
+          if len({python_version, eaf_version, project_version}) != 1:
+              raise SystemExit(
+                  "plugin version mismatch: "
+                  f"Python={python_version!r}, Elyx={eaf_version!r}, pyproject={project_version!r}"
+              )
+
+          # Author is intentionally not compared against a template constant.
+          # Plugin authors are free to change both Python and Elyx author metadata.
+          print(f"id={eaf_id} version={eaf_version}")
+          PY
+
       - name: Smoke-test EAF packaging
         env:
           PLUGIN_PY: ${{ steps.plugin.outputs.file }}
