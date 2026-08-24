@@ -4,6 +4,29 @@
 
 ## Backlog
 
+### Runtime DEX bridge validation on AyuGram
+
+EAF успешно устанавливается на AyuGram 12.9.0 и Python UI плагина создаётся, однако реальный JVM callback пока не подтверждён.
+
+Наблюдавшийся runtime-симптом:
+
+```text
+Failed to execute settings callback example: cannot call invokeSettingsActionCallback: JVM plugin is not loaded
+RuntimeError: cannot call invokeSettingsActionCallback: JVM plugin is not loaded
+```
+
+Это означает, что `TemplatePlugin.create_settings()` и Elyx installation path работают, но `JvmPluginBridge.load()` не оставил загруженный `ru.n08i40k.template.Plugin` в `jvm_plugin.klass` к моменту callback.
+
+Следующий runtime-debug gate:
+
+- собрать полный load-log начиная с `on_plugin_load()` / `_prepare_jvm_plugin()`;
+- проверить фактический путь и чтение `assets/classes.dex` после распаковки Elyx;
+- проверить создание `InMemoryDexClassLoader` и parent class loader;
+- зафиксировать точное исключение из `loader.loadClass("ru.n08i40k.template.Plugin")`, если оно возникает;
+- после исправления проверить settings callback, chat-context callback, Xposed hook и unload/reload без stale class loader.
+
+Статус: known runtime issue; packaging/install verified, JVM execution pending.
+
 ### Structured Elyx live reload
 
 Перевести текущий legacy `just watch` / `tools/dev_watch.py` на структурированный Elyx/EAF live reload, чтобы Python-модули, assets и `assets/classes.dex` синхронизировались независимо и без пересборки всего однофайлового payload.
