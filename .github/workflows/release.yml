@@ -34,7 +34,7 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve plugin source file
+      - name: Resolve plugin identities
         id: plugin
         run: |
           plugin_py="$(grep -ls '^__id__ = ' -- *.py | head -n1)"
@@ -42,13 +42,19 @@ jobs:
             echo "No plugin .py with __id__ found in the repository root" >&2
             exit 1
           fi
-          plugin_id="$(sed -n 's/^__id__ = "\(.*\)"$/\1/p' "$plugin_py")"
-          if [[ -z "$plugin_id" ]]; then
+          legacy_id="$(sed -n 's/^__id__ = "\(.*\)"$/\1/p' "$plugin_py")"
+          eaf_id="$(sed -n 's/^id: *//p' metainfo.yml | head -n1)"
+          if [[ -z "$legacy_id" ]]; then
             echo "Failed to read __id__ from $plugin_py" >&2
             exit 1
           fi
+          if [[ -z "$eaf_id" ]]; then
+            echo "Failed to read structured id from metainfo.yml" >&2
+            exit 1
+          fi
           echo "file=${plugin_py}" >> "$GITHUB_OUTPUT"
-          echo "id=${plugin_id}" >> "$GITHUB_OUTPUT"
+          echo "legacy_id=${legacy_id}" >> "$GITHUB_OUTPUT"
+          echo "id=${eaf_id}" >> "$GITHUB_OUTPUT"
 
       - name: Ensure Telegram JARs exist
         run: |
@@ -148,6 +154,9 @@ jobs:
                   raise SystemExit("main.py was modified during EAF packaging")
               if source_dex.hex().encode() in source_main:
                   raise SystemExit("release DEX was unexpectedly embedded into main.py")
+              metainfo = archive.read("metainfo.yml").decode("utf-8")
+              if f"id: {os.environ['PLUGIN_ID']}" not in metainfo.splitlines():
+                  raise SystemExit("packaged metainfo does not contain the release Elyx id")
               if archive.testzip() is not None:
                   raise SystemExit("EAF ZIP integrity check failed")
           PY
