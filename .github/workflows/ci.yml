@@ -25,7 +25,7 @@ jobs:
 
       - name: Validate Python tooling
         run: |
-          python -m py_compile tools/embed_dex.py tools/build_eaf.py scripts/prepare_release.py
+          python -m py_compile tools/embed_dex.py tools/build_eaf.py tools/validate_dex_runtime.py scripts/prepare_release.py
           python -m compileall -q plugin_src
 
       - name: Resolve plugin identities
@@ -170,6 +170,11 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" buildDexRelease
+
+      - name: Validate release DEX runtime surface
+        if: steps.host-jars.outputs.available == 'true'
+        run: |
+          python tools/validate_dex_runtime.py build/outputs/dex/release/classes.dex
 
       - name: Build EAF with release DEX
         if: steps.host-jars.outputs.available == 'true'
