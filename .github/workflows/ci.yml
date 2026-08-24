@@ -196,3 +196,49 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      - name: Detect Telegram publishing configuration
+        id: telegram
+        if: >-
+          steps.host-jars.outputs.available == 'true' &&
+          (github.event_name == 'push' || github.actor == github.repository_owner)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Telegram publishing is disabled; configure TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID repository secrets."
+          fi
+
+      - name: Publish installable EAF to Telegram
+        if: steps.telegram.outputs.configured == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+        run: |
+          ref="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          short_sha="${GITHUB_SHA::12}"
+          caption="$(printf 'EAF build: %s\nRef: %s\nCommit: %s\nCI: https://github.com/%s/actions/runs/%s' \
+            "$PLUGIN_ID" "$ref" "$short_sha" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+
+          response="$(
+            curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
+              --request POST \
+              --form "chat_id=${TELEGRAM_CHAT_ID}" \
+              --form "document=@dist/${PLUGIN_ID}.eaf;filename=${PLUGIN_ID}.eaf;type=application/octet-stream" \
+              --form "caption=${caption}" \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+          )"
+
+          printf '%s' "$response" | python -c '
+          import json
+          import sys
+          result = json.load(sys.stdin)
+          if not result.get("ok"):
+              raise SystemExit(result.get("description", "Telegram API returned ok=false"))
+          print("Telegram publication succeeded")
+          '
