@@ -51,25 +51,57 @@ jobs:
             --refmap refmap.yml \
             --metainfo metainfo.yml \
             --extra-source-dir plugin_src \
+            --asset-dir assets \
             --output "dist/${PLUGIN_ID}.eaf"
 
-      - name: Verify archive layout
+      - name: Verify binary DEX archive layout
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
         run: |
           python - <<'PY'
+          import os
           from pathlib import Path
           from zipfile import ZipFile
 
           archives = list(Path("dist").glob("*.eaf"))
           if len(archives) != 1:
               raise SystemExit(f"expected one EAF, found: {archives}")
+
+          expected_dex = Path("build/ci/classes.dex").read_bytes()
+          expected_main = Path(os.environ["PLUGIN_PY"]).read_bytes()
+
           with ZipFile(archives[0]) as archive:
               names = set(archive.namelist())
-              required = {"refmap.yml", "metainfo.yml", "main.py", "src/__init__.py"}
+              required = {
+                  "refmap.yml",
+                  "metainfo.yml",
+                  "main.py",
+                  "src/__init__.py",
+                  "assets/classes.dex",
+              }
               missing = required - names
               if missing:
                   raise SystemExit(f"missing archive entries: {sorted(missing)}")
+
+              packaged_dex = archive.read("assets/classes.dex")
+              if packaged_dex != expected_dex:
+                  raise SystemExit("packaged DEX differs from input DEX")
+              if not packaged_dex.startswith(b"dex\n"):
+                  raise SystemExit("packaged DEX has invalid magic")
+
+              packaged_main = archive.read("main.py")
+              if packaged_main != expected_main:
+                  raise SystemExit("main.py was modified while packaging")
+              if expected_dex.hex().encode() in packaged_main:
+                  raise SystemExit("DEX was unexpectedly hex-embedded into main.py")
+
+              refmap = archive.read("refmap.yml").decode("utf-8")
+              if "assets: assets" not in refmap:
+                  raise SystemExit("refmap does not declare the assets directory")
+
               if archive.testzip() is not None:
                   raise SystemExit("archive integrity check failed")
+
           print(archives[0])
           PY
 
@@ -123,4 +155,5 @@ jobs:
             --refmap refmap.yml \
             --metainfo metainfo.yml \
             --extra-source-dir plugin_src \
+            --asset-dir assets \
             --output "dist/${PLUGIN_ID}.eaf"
