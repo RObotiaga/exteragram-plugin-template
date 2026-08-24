@@ -4,12 +4,13 @@
 
 ## Как это устроено
 
-- `<plugin-id>.py` — основной Python entry point: метаданные, загрузка встроенного DEX и мост к Kotlin-классу `Plugin`.
+- `<plugin-id>.py` — основной Python entry point: метаданные, загрузка бинарного DEX из EAF и мост к Kotlin-классу `Plugin`.
 - `src/main/kotlin/...` — основная Kotlin-логика: хуки, пункты меню, настройки и i18n.
 - `plugin_src/` — дополнительные Python-модули. При EAF-сборке каталог попадает в архив как пакет `src/`.
+- `assets/` — дополнительные бинарные/текстовые ресурсы проекта. Release `classes.dex` добавляется сюда автоматически как `assets/classes.dex`.
 - `refmap.yml` и `metainfo.yml` — структура и метаданные Elyx.
-- `tools/embed_dex.py` — встраивает `classes.dex` в копию Python entry point.
-- `tools/build_eaf.py` — валидирует Python-файлы и собирает единый `.eaf`.
+- `tools/build_eaf.py` — валидирует Python-файлы, добавляет бинарный DEX и собирает единый `.eaf`.
+- `tools/embed_dex.py` — старый упаковщик для совместимого однофайлового режима; в EAF-сборке не используется.
 - `tools/dev_watch.py` — старый live-reload для однофайлового режима через `extera dev-sync`.
 - `libs/Telegram*.jar` — классы хост-приложения; генерируются из APK командой `just update-apk`.
 
@@ -21,13 +22,20 @@
 <plugin-id>.eaf
 ├── refmap.yml
 ├── metainfo.yml
-├── main.py          # копия entry point с встроенным release classes.dex
+├── main.py                 # исходный Python entry point без встроенного DEX
+├── assets/
+│   ├── classes.dex         # настоящий бинарный release DEX
+│   └── ...                 # дополнительные ресурсы из assets/
 └── src/
     ├── __init__.py
-    └── ...          # любые дополнительные Python-модули из plugin_src/
+    └── ...                 # дополнительные Python-модули из plugin_src/
 ```
 
-`refmap.yml` всегда находится в корне архива. EAF является обычным ZIP-совместимым архивом, поэтому его структуру можно проверить стандартными ZIP-инструментами.
+`refmap.yml` находится в корне архива и объявляет `assets: assets`. EAF является обычным ZIP-совместимым архивом, поэтому его структуру можно проверить стандартными ZIP-инструментами.
+
+DEX больше не переводится в hex и не вставляется в `main.py`. `JvmPluginBridge` определяет каталог `main.py` через `__file__`, читает `assets/classes.dex` как бинарные данные и передаёт их в `InMemoryDexClassLoader`.
+
+Старый hex-механизм остаётся резервным только для `just embed`, чтобы не ломать однофайловую совместимость во время миграции.
 
 ## Многофайловый Python
 
@@ -46,6 +54,19 @@ from src.helpers import some_helper
 ```
 
 Сборщик рекурсивно добавляет содержимое `plugin_src/`, исключает `__pycache__`/`.pyc` и проверяет синтаксис всех Python-файлов перед упаковкой.
+
+## Дополнительные assets
+
+Если плагину нужны изображения, JSON, модели или другие файлы, создайте каталог `assets/`:
+
+```text
+assets/
+├── config.json
+└── icons/
+    └── example.png
+```
+
+Они попадут в EAF с сохранением относительных путей. Файл `assets/classes.dex` резервируется сборщиком: его нельзя хранить вручную, потому что он всегда берётся из результата Gradle через параметр `--dex`.
 
 ## Требования
 
@@ -78,6 +99,21 @@ just build
 dist/<plugin-id>.eaf
 ```
 
+Путь сборки:
+
+```text
+Kotlin sources
+    ↓ Gradle
+classes.dex
+    ↓
+assets/classes.dex ─┐
+Python modules ─────┤
+assets/* ───────────┤
+refmap/metainfo ────┤
+                    ↓
+             <plugin-id>.eaf
+```
+
 Если release DEX уже собран, можно отдельно выполнить упаковку:
 
 ```sh
@@ -91,7 +127,18 @@ just embed
 # -> dist/<plugin-id>.py
 ```
 
-GitHub Actions workflow **Release** теперь публикует `<plugin-id>.eaf`. Workflow **CI** собирает release DEX, создаёт EAF и проверяет обязательные файлы и целостность ZIP.
+В этом режиме `tools/embed_dex.py` по-прежнему вставляет DEX в hex-комментарии, а загрузчик автоматически использует их как fallback, если `assets/classes.dex` отсутствует.
+
+GitHub Actions workflow **Release** публикует `<plugin-id>.eaf`. Workflow **CI** всегда выполняет smoke-сборку с тестовым бинарным DEX и проверяет:
+
+- наличие `assets/classes.dex`;
+- точное совпадение бинарного DEX с входным файлом;
+- отсутствие DEX-hex в `main.py`;
+- неизменность `main.py` при EAF-упаковке;
+- структуру `refmap.yml`;
+- целостность ZIP/EAF.
+
+Если в репозитории присутствуют `libs/Telegram.jar` и `libs/Telegram-compile.jar`, CI дополнительно выполняет полный Gradle → release DEX → EAF путь.
 
 ## Релизы
 
@@ -101,7 +148,7 @@ Workflow **Release** запускается вручную и принимает
 - `version` в `metainfo.yml`;
 - версию проекта в `pyproject.toml`.
 
-После этого собираются DEX и EAF, создаётся build provenance attestation, коммитятся метаданные, создаётся tag и GitHub Release.
+После этого собираются DEX и EAF, проверяется бинарный `assets/classes.dex`, создаётся build provenance attestation, коммитятся метаданные, создаётся tag и GitHub Release.
 
 ## Прочие команды
 
@@ -111,7 +158,7 @@ Workflow **Release** запускается вручную и принимает
 
 ## Статус миграции
 
-Текущий EAF уже поддерживает несколько Python-файлов и единый релизный архив. На этом этапе DEX по-прежнему встраивается в `main.py` проверенным механизмом hex-комментариев. Следующий независимый шаг — при необходимости перевести загрузчик на бинарный `classes.dex` как отдельный ресурс внутри EAF, не меняя Kotlin/Gradle-часть.
+Многофайловый EAF и бинарный DEX уже разделены: Python-код остаётся обычным исходным кодом, а JVM-движок хранится отдельным `assets/classes.dex`. Следующий независимый этап — перевести dev-watch на структурированный Elyx live-reload, чтобы изменения Python-файлов и DEX синхронизировались на устройство независимо.
 
 ## Лицензия
 
