@@ -172,7 +172,7 @@ Workflow **Release** запускается вручную и принимает
 
 ## Статус миграции
 
-Многофайловый EAF и бинарный DEX разделены: Python-код остаётся обычным исходным кодом, а JVM-движок хранится отдельным `assets/classes.dex`. Structured identity берётся из `metainfo.yml` и синхронизируется с Python/JVM metadata. Загрузка DEX из structured Elyx каталога проверена на AyuGram на устройстве. Следующий независимый этап — перевести dev-watch на structured Elyx live-reload, чтобы изменения Python-файлов и DEX синхронизировались на устройство независимо.
+Многофайловый EAF и бинарный DEX разделены: Python-код остаётся обычным исходным кодом, а JVM-движок хранится отдельным `assets/classes.dex`. Structured identity берётся из `metainfo.yml` и синхронизируется с Python/JVM metadata. Загрузка DEX из structured Elyx каталога и Python → JVM callback подтверждены на реальном AyuGram runtime. Следующий независимый этап — перевести dev-watch на structured Elyx live-reload, чтобы изменения Python-файлов и DEX синхронизировались на устройство независимо.
 
 ## Лицензия
 
