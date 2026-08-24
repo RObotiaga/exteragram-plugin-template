@@ -2,7 +2,7 @@ RELEASE_DEX_PATH := `realpath -m build/outputs/dex/release/classes.dex`
 DEBUG_DEX_PATH := `realpath -m build/outputs/dex/debug/classes.dex`
 
 PLUGIN_PY := `grep -ls '^__id__ = ' -- *.py | head -n1`
-PLUGIN_ID := `sed -n 's/^__id__ = "\(.*\)"$/\1/p' {{ PLUGIN_PY }}`
+PLUGIN_ID := `grep -h '^__id__ = ' -- *.py | head -n1 | sed -n 's/^__id__ = "\(.*\)"$/\1/p'`
 DIST_PY := "dist/" + file_name(PLUGIN_PY)
 DIST_EAF := "dist/" + PLUGIN_ID + ".eaf"
 
@@ -35,7 +35,7 @@ ci: (_require "java")
     ./gradlew buildDexRelease
     cp {{ RELEASE_DEX_PATH }} ./
 
-# build the structured multi-file Elyx archive (default release artifact)
+# build the structured multi-file Elyx archive from an already-built DEX
 eaf DEX_PATH=RELEASE_DEX_PATH OUTPUT=DIST_EAF: (_require "uv")
     #!/usr/bin/env bash
     set -euo pipefail
