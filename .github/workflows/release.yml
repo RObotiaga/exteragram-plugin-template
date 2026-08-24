@@ -113,11 +113,13 @@ jobs:
             --refmap refmap.yml \
             --metainfo metainfo.yml \
             --extra-source-dir plugin_src \
+            --asset-dir assets \
             --output "$release_dir/${PLUGIN_ID}.eaf"
 
       - name: Inspect EAF archive
         env:
           PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
         run: |
           python - <<'PY'
           import os
@@ -125,13 +127,29 @@ jobs:
           from zipfile import ZipFile
 
           path = Path(os.environ["RUNNER_TEMP"]) / "release" / f"{os.environ['PLUGIN_ID']}.eaf"
+          source_dex = Path("build/outputs/dex/release/classes.dex").read_bytes()
+          source_main = Path(os.environ["PLUGIN_PY"]).read_bytes()
+
           with ZipFile(path) as archive:
               names = archive.namelist()
               print("\n".join(names))
-              required = {"refmap.yml", "metainfo.yml", "main.py"}
+              required = {
+                  "refmap.yml",
+                  "metainfo.yml",
+                  "main.py",
+                  "assets/classes.dex",
+              }
               missing = required.difference(names)
               if missing:
                   raise SystemExit(f"missing EAF entries: {sorted(missing)}")
+              if archive.read("assets/classes.dex") != source_dex:
+                  raise SystemExit("packaged DEX differs from release DEX")
+              if archive.read("main.py") != source_main:
+                  raise SystemExit("main.py was modified during EAF packaging")
+              if source_dex.hex().encode() in source_main:
+                  raise SystemExit("release DEX was unexpectedly embedded into main.py")
+              if archive.testzip() is not None:
+                  raise SystemExit("EAF ZIP integrity check failed")
           PY
 
       - name: Attest build provenance
