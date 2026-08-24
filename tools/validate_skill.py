@@ -27,6 +27,7 @@ EXPECTED_REFERENCES = {
     "10-build-ci-release.md",
     "11-recipes.md",
     "12-pitfalls-compatibility.md",
+    "13-field-failure-playbook.md",
     "SOURCES.md",
 }
 
