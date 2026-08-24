@@ -19,7 +19,7 @@ from typing import Optional, Any, cast
 
 __id__ = "exteragram-plugin-template"
 __name__ = "exteraGram plugin template"
-__description__ = "Шаблон плагина exteraGram с DEX, встроенным прямо в исходник"
+__description__ = "Шаблон плагина exteraGram с Kotlin/DEX-движком и многофайловой EAF-сборкой"
 __author__ = "@n08i40k_extera"
 __version__ = "0.0.0"
 __min_version__ = "12.1.1"
@@ -27,7 +27,9 @@ __min_version__ = "12.1.1"
 LOGCAT_TAG = __id__
 
 JVM_PLUGIN_CLASS = "ru.n08i40k.template.Plugin"
+DEX_ASSET_RELATIVE_PATH = os.path.join("assets", "classes.dex")
 
+# Legacy single-file .plugin compatibility. EAF builds use assets/classes.dex.
 DEX_COMMENT_BEGIN = "# === EMDEDDED DEX BEGIN ==="
 DEX_COMMENT_END = "# === EMDEDDED DEX END ==="
 
@@ -71,8 +73,8 @@ I18N_STATUS: dict[str, dict[str, str]] = {
         "ru": "Не удалось определить текущий чат",
     },
     "status.error.dex.missing": {
-        "en": "Plugin engine is missing from the source file",
-        "ru": "Движок плагина отсутствует в файле плагина",
+        "en": "Plugin engine DEX is missing from the EAF assets",
+        "ru": "DEX-движок плагина отсутствует в ресурсах EAF",
     },
 }
 
@@ -101,7 +103,7 @@ def _dialog_id_of(obj: Any) -> Optional[int]:
 
 
 class JvmPluginBridge:
-    """Loads classes.dex embedded (as a hex comment) into this very .py file."""
+    """Loads the JVM plugin DEX from EAF assets, with legacy embedded fallback."""
 
     klass: Optional[Class]
 
@@ -110,9 +112,20 @@ class JvmPluginBridge:
         self.klass = None
 
     def load(self):
-        dex_data = self._read_embedded_dex()
+        dex_data = self._read_asset_dex()
+        dex_source = DEX_ASSET_RELATIVE_PATH
+
         if dex_data is None:
-            self.plugin.log("Embedded DEX is unavailable; plugin will not load")
+            dex_data = self._read_embedded_dex()
+            dex_source = "legacy embedded DEX"
+
+        if dex_data is None:
+            self.plugin.log("DEX is unavailable; plugin will not load")
+            self.plugin._show_error(self.plugin._t("status.error.dex.missing"))
+            return
+
+        if not dex_data.startswith(b"dex\n"):
+            self.plugin.log(f"Invalid DEX magic from {dex_source}; plugin will not load")
             self.plugin._show_error(self.plugin._t("status.error.dex.missing"))
             return
 
@@ -122,8 +135,9 @@ class JvmPluginBridge:
                 ApplicationLoader.applicationContext.getClassLoader(),
             )
             self.klass = loader.loadClass(String(JVM_PLUGIN_CLASS))
+            self.plugin.log(f"Loaded DEX from {dex_source} ({len(dex_data)} bytes)")
         except Exception as e:
-            self.plugin.log_exception("Failed to load DEX", e)
+            self.plugin.log_exception(f"Failed to load DEX from {dex_source}", e)
 
     def call(self, name: str, *args: Any, types: tuple = ()) -> Any:
         """Invoke a static method of the loaded JVM plugin class.
@@ -135,6 +149,33 @@ class JvmPluginBridge:
             raise RuntimeError(f"cannot call {name}: JVM plugin is not loaded")
 
         return self.klass.getDeclaredMethod(String(name), *types).invoke(None, *args)
+
+    def _read_asset_dex(self) -> Optional[bytes]:
+        own_file = globals().get("__file__")
+        if not isinstance(own_file, str) or not own_file:
+            self.plugin.log("__file__ is unavailable; cannot resolve EAF DEX asset")
+            return None
+
+        dex_path = os.path.join(
+            os.path.dirname(os.path.abspath(own_file)),
+            DEX_ASSET_RELATIVE_PATH,
+        )
+
+        try:
+            with open(dex_path, "rb") as f:
+                dex_data = f.read()
+        except FileNotFoundError:
+            self.plugin.log(f"DEX asset not found at {dex_path}; trying legacy payload")
+            return None
+        except Exception as e:
+            self.plugin.log_exception(f"Failed to read DEX asset at {dex_path}", e)
+            return None
+
+        if not dex_data:
+            self.plugin.log(f"DEX asset is empty at {dex_path}")
+            return None
+
+        return dex_data
 
     def _read_own_source(self) -> Optional[str]:
         candidates: list[str] = []
@@ -162,7 +203,7 @@ class JvmPluginBridge:
     def _read_embedded_dex(self) -> Optional[bytes]:
         source = self._read_own_source()
         if source is None:
-            self.plugin.log("Failed to read plugin source for embedded DEX")
+            self.plugin.log("Failed to read plugin source for legacy embedded DEX")
             return None
 
         collecting = False
@@ -183,13 +224,12 @@ class JvmPluginBridge:
 
         hex_data = "".join(hex_parts)
         if not hex_data:
-            self.plugin.log("Embedded DEX payload is empty")
             return None
 
         try:
             return bytes.fromhex(hex_data)
         except ValueError as e:
-            self.plugin.log_exception("Failed to decode embedded DEX", e)
+            self.plugin.log_exception("Failed to decode legacy embedded DEX", e)
             return None
 
 

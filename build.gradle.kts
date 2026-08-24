@@ -42,16 +42,28 @@ private val TELEGRAM_COMPILE_PACKAGE_PREFIXES =
 
 private val SHADED_PACKAGE = "ru/n08i40k/template_shaded"
 
-// Packages that must NOT be relocated — provided by the host app or Android runtime.
-// compileOnly-only dependencies must also be listed here (their classes are resolved
-// from the host classloader at runtime, so references to them must stay unrelocated).
+// ProGuard/R8 metadata bundled in dependency jars describes their original package
+// names. Once those jars are relocated the rules are stale, are not runtime assets,
+// and only produce misleading "rule does not match anything" diagnostics.
+private val NON_RUNTIME_SHADED_RESOURCE_PREFIXES =
+    listOf(
+        "META-INF/com.android.tools/r8/",
+        "META-INF/proguard/",
+    )
+
+// Packages that must NOT be relocated — provided by the host/Android runtime or
+// compile-only marker APIs. Compile-only annotations must keep their original names
+// so R8 can resolve them from the compile classpath rather than inventing a shaded
+// annotation class which will never exist at runtime.
 private val RELOCATION_EXCLUDED_PREFIXES: List<String> by lazy {
     TELEGRAM_COMPILE_PACKAGE_PREFIXES + listOf(
         "ru/n08i40k/template/",
         "android/",
         "dalvik/",
         "javax/",
+        "androidx/annotation/",
         "androidx/recyclerview/",
+        "org/codehaus/mojo/animal_sniffer/",
     )
 }
 
@@ -74,14 +86,43 @@ private class ShadedRemapper : Remapper() {
 
 private val SHADED_REMAPPER = ShadedRemapper()
 
-private fun remapClassBytes(bytes: ByteArray): ByteArray {
+private class ExistingClassNameRemapper(
+    private val knownClassNames: Set<String>
+) : Remapper() {
+    override fun map(internalName: String): String {
+        if ('-' !in internalName || internalName in knownClassNames) return internalName
+
+        // dex2jar sanitizes synthetic dex names such as Foo-IA to Foo_IA.class but
+        // can leave descriptors pointing at Foo-IA. Normalize only when the exact
+        // underscore candidate is known to exist, so legitimate '-' names are safe.
+        val candidate = internalName.replace('-', '_')
+        return if (candidate in knownClassNames) candidate else internalName
+    }
+}
+
+private fun remapClassBytes(bytes: ByteArray, remapper: Remapper): ByteArray {
     val cr = ClassReader(bytes)
     val cw = ClassWriter(0)
-    cr.accept(ClassRemapper(cw, SHADED_REMAPPER), 0)
+    cr.accept(ClassRemapper(cw, remapper), 0)
     return cw.toByteArray()
 }
 
+private fun remapClassBytes(bytes: ByteArray): ByteArray =
+    remapClassBytes(bytes, SHADED_REMAPPER)
+
 private fun File.isJarFile(): Boolean = isFile && extension.equals("jar", ignoreCase = true)
+
+private fun File.classInternalNames(): Set<String> =
+    ZipFile(this).use { zip ->
+        zip.entries()
+            .asSequence()
+            .filter { !it.isDirectory && it.name.endsWith(".class") }
+            .map { it.name.removeSuffix(".class") }
+            .toSet()
+    }
+
+private fun isNonRuntimeShadedResource(name: String): Boolean =
+    NON_RUNTIME_SHADED_RESOURCE_PREFIXES.any(name::startsWith)
 
 private val MODULE_NAME_WITH_VERSION = Regex("""^(.+?)-\d[\w.+-]*$""")
 
@@ -353,6 +394,12 @@ fun registerBuildDexTask(variant: String) {
                 resolveClasspathArtifactPaths("${variant}CompileClasspath", extractedArtifactRoot)
             val embeddedJars = resolveClasspathArtifactPaths(embed.name, extractedArtifactRoot)
 
+            val hostCompileJar = file(TELEGRAM_COMPILE_JAR_PATH)
+            if (!hostCompileJar.isJarFile()) {
+                throw GradleException("Missing host compile jar: ${hostCompileJar.absolutePath}")
+            }
+            val hostClasspathRemapper = ExistingClassNameRemapper(hostCompileJar.classInternalNames())
+
             val embeddedModules = embeddedJars.map { File(it).artifactKey() }.toSet()
             val filteredRuntimeJars =
                 runtimeJars.filterNot { jarPath -> File(jarPath).artifactKey() in embeddedModules }
@@ -399,7 +446,7 @@ fun registerBuildDexTask(variant: String) {
                                 val shadedName =
                                     SHADED_REMAPPER.map(entry.name.removeSuffix(".class"))
                                 add("$shadedName.class", remapClassBytes(bytes))
-                            } else {
+                            } else if (!isNonRuntimeShadedResource(entry.name)) {
                                 add(entry.name, bytes)
                             }
                         }
@@ -409,18 +456,24 @@ fun registerBuildDexTask(variant: String) {
 
             val dexInputs = listOf(mergedShadedJar.absolutePath)
 
-            val dexModules =
-                (embeddedJars + filteredRuntimeJars).map { File(it).artifactKey() }.toSet()
+            // Runtime-only dependency jars are physically present in the shaded DEX input,
+            // so their original copies must not also appear on --classpath. Embedded jars are
+            // different: their DEX classes have relocated names, while host/compile-only API
+            // classes may still refer to the original names (for example kotlin.Unit). Keep
+            // those original embedded jars on the R8 classpath to close that reference graph.
+            val runtimeDexModules = filteredRuntimeJars.map { File(it).artifactKey() }.toSet()
             val classpathJars = compileJars
                 .filterNot {
                     val jar = File(it)
-                    it == androidJar.absolutePath || jar.artifactKey() in dexModules
+                    it == androidJar.absolutePath || jar.artifactKey() in runtimeDexModules
                 }
                 .distinct()
 
             // R8 rejects a type appearing on --classpath twice (e.g. XposedBridge is
             // provided both by Aliuhook and by the host jar), so the classpath jars are
-            // merged into a single jar where the first occurrence of a class wins.
+            // merged into a single jar where the first occurrence of a class wins. While
+            // copying, defensively normalize dex2jar's Foo-IA -> Foo_IA references against
+            // the actual class names present in Telegram-compile.jar.
             val mergedClasspathJar =
                 buildDirFile.resolve("intermediates/merged-classpath/$variant/classpath.jar")
             mergedClasspathJar.parentFile.mkdirs()
@@ -433,8 +486,9 @@ fun registerBuildDexTask(variant: String) {
                             .forEach { entry ->
                                 if (!seenClasspathEntries.add(entry.name)) return@forEach
 
+                                val bytes = zip.getInputStream(entry).readBytes()
                                 zos.putNextEntry(ZipEntry(entry.name))
-                                zos.write(zip.getInputStream(entry).readBytes())
+                                zos.write(remapClassBytes(bytes, hostClasspathRemapper))
                                 zos.closeEntry()
                             }
                     }
@@ -456,9 +510,10 @@ fun registerBuildDexTask(variant: String) {
             buildDexRules.parentFile.mkdirs()
             buildDexRules.writeText(
                 """
-                # The host Telegram classpath is intentionally partial here; only the plugin and
-                # embedded runtime jars are packaged into the output dex.
-                -ignorewarnings
+                # animal-sniffer's IgnoreJRERequirement is a CLASS-retention compile-time marker
+                # referenced by kotlinx.coroutines. It is neither executable code nor a runtime
+                # dependency, so keep the reference unshaded and suppress only this exact marker.
+                -dontwarn org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement
                 """.trimIndent()
             )
 
@@ -492,11 +547,28 @@ fun registerBuildDexTask(variant: String) {
             if (standardOutput.isNotBlank()) logger.lifecycle(standardOutput)
             if (standardError.isNotBlank()) logger.error(standardError)
 
+            // Do not silently regress to a permissive -ignorewarnings build. Missing class
+            // warnings and stale relocated ProGuard metadata are build-pipeline defects and
+            // must be investigated whenever the host APK/dependency set changes.
+            val disallowedDiagnostics = standardError.lineSequence()
+                .filter {
+                    it.contains("Warning:") ||
+                            it.contains("Proguard configuration rule does not match anything")
+                }
+                .toList()
+            if (disallowedDiagnostics.isNotEmpty()) {
+                throw GradleException(
+                    "r8 emitted disallowed diagnostics for variant '$variant':\n" +
+                            disallowedDiagnostics.joinToString("\n")
+                )
+            }
+
             val exitCode = out.result.get().exitValue
             if (exitCode != 0) {
                 throw GradleException("r8 failed for variant '$variant' with exit code $exitCode.")
             }
 
+            logger.lifecycle("R8 diagnostics clean for $variant (strict missing-class/rule gate passed)")
             logger.lifecycle(
                 "Dex created for $variant at: ${outputDirFile.absolutePath}/classes.dex"
             )

@@ -1,0 +1,244 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  eaf-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Validate Python tooling
+        run: |
+          python -m py_compile tools/embed_dex.py tools/build_eaf.py scripts/prepare_release.py
+          python -m compileall -q plugin_src
+
+      - name: Resolve plugin identities
+        id: plugin
+        run: |
+          plugin_py="$(grep -ls '^__id__ = ' -- *.py | head -n1)"
+          legacy_id="$(sed -n 's/^__id__ = "\(.*\)"$/\1/p' "$plugin_py")"
+          eaf_id="$(sed -n 's/^id: *//p' metainfo.yml | head -n1)"
+          test -n "$plugin_py"
+          test -n "$legacy_id"
+          test -n "$eaf_id"
+          echo "file=$plugin_py" >> "$GITHUB_OUTPUT"
+          echo "legacy_id=$legacy_id" >> "$GITHUB_OUTPUT"
+          echo "id=$eaf_id" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test EAF packaging
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+        run: |
+          mkdir -p build/ci
+          printf 'dex\n035\0eaf-packaging-smoke-test' > build/ci/classes.dex
+          python tools/build_eaf.py \
+            --dex build/ci/classes.dex \
+            --plugin-file "$PLUGIN_PY" \
+            --refmap refmap.yml \
+            --metainfo metainfo.yml \
+            --extra-source-dir plugin_src \
+            --asset-dir assets \
+            --output "dist/${PLUGIN_ID}.eaf"
+
+      - name: Reject invalid Elyx id
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+        run: |
+          cp metainfo.yml build/ci/invalid-metainfo.yml
+          sed -i 's/^id: .*/id: invalid-id/' build/ci/invalid-metainfo.yml
+          if python tools/build_eaf.py \
+            --dex build/ci/classes.dex \
+            --plugin-file "$PLUGIN_PY" \
+            --refmap refmap.yml \
+            --metainfo build/ci/invalid-metainfo.yml \
+            --extra-source-dir plugin_src \
+            --asset-dir assets \
+            --output build/ci/invalid.eaf; then
+              echo "builder unexpectedly accepted an Elyx id containing '-'" >&2
+              exit 1
+          fi
+          test ! -e build/ci/invalid.eaf
+
+      - name: Verify binary DEX archive layout
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          expected_archive = Path("dist") / f"{os.environ['PLUGIN_ID']}.eaf"
+          archives = list(Path("dist").glob("*.eaf"))
+          if archives != [expected_archive]:
+              raise SystemExit(f"unexpected EAF outputs: {archives}")
+
+          expected_dex = Path("build/ci/classes.dex").read_bytes()
+          expected_main = Path(os.environ["PLUGIN_PY"]).read_bytes()
+
+          with ZipFile(expected_archive) as archive:
+              names = set(archive.namelist())
+              required = {
+                  "refmap.yml",
+                  "metainfo.yml",
+                  "main.py",
+                  "src/__init__.py",
+                  "assets/classes.dex",
+              }
+              missing = required - names
+              if missing:
+                  raise SystemExit(f"missing archive entries: {sorted(missing)}")
+
+              packaged_dex = archive.read("assets/classes.dex")
+              if packaged_dex != expected_dex:
+                  raise SystemExit("packaged DEX differs from input DEX")
+              if not packaged_dex.startswith(b"dex\n"):
+                  raise SystemExit("packaged DEX has invalid magic")
+
+              packaged_main = archive.read("main.py")
+              if packaged_main != expected_main:
+                  raise SystemExit("main.py was modified while packaging")
+              if expected_dex.hex().encode() in packaged_main:
+                  raise SystemExit("DEX was unexpectedly hex-embedded into main.py")
+
+              refmap = archive.read("refmap.yml").decode("utf-8")
+              if "assets: assets" not in refmap:
+                  raise SystemExit("refmap does not declare the assets directory")
+
+              metainfo = archive.read("metainfo.yml").decode("utf-8")
+              expected_id_line = f"id: {os.environ['PLUGIN_ID']}"
+              if expected_id_line not in metainfo.splitlines():
+                  raise SystemExit("packaged metainfo does not contain the canonical Elyx id")
+
+              if archive.testzip() is not None:
+                  raise SystemExit("archive integrity check failed")
+
+          print(expected_archive)
+          PY
+
+      - name: Detect host JARs
+        id: host-jars
+        run: |
+          available=true
+          for jar in libs/Telegram.jar libs/Telegram-compile.jar; do
+            if [[ ! -s "$jar" ]]; then
+              echo "::notice::$jar is absent; full Gradle/DEX build is skipped. Run 'just update-apk' and commit libs/ to enable it."
+              available=false
+            fi
+          done
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java
+        if: steps.host-jars.outputs.available == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Android SDK
+        if: steps.host-jars.outputs.available == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        if: steps.host-jars.outputs.available == 'true'
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "build-tools;36.1.0" "platforms;android-36.1"
+          printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Build release DEX
+        if: steps.host-jars.outputs.available == 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" buildDexRelease
+
+      - name: Build EAF with release DEX
+        if: steps.host-jars.outputs.available == 'true'
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+        run: |
+          rm -f "dist/${PLUGIN_ID}.eaf"
+          python tools/build_eaf.py \
+            --dex build/outputs/dex/release/classes.dex \
+            --plugin-file "$PLUGIN_PY" \
+            --refmap refmap.yml \
+            --metainfo metainfo.yml \
+            --extra-source-dir plugin_src \
+            --asset-dir assets \
+            --output "dist/${PLUGIN_ID}.eaf"
+
+      - name: Upload installable EAF
+        if: steps.host-jars.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.plugin.outputs.id }}-${{ github.sha }}
+          path: dist/${{ steps.plugin.outputs.id }}.eaf
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Detect Telegram publishing configuration
+        id: telegram
+        if: >-
+          steps.host-jars.outputs.available == 'true' &&
+          (github.event_name == 'push' || github.actor == github.repository_owner)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Telegram publishing is disabled; configure TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID repository secrets."
+          fi
+
+      - name: Publish installable EAF to Telegram
+        if: steps.telegram.outputs.configured == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+        run: |
+          ref="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          short_sha="${GITHUB_SHA::12}"
+          caption="$(printf 'EAF build: %s\nRef: %s\nCommit: %s\nCI: https://github.com/%s/actions/runs/%s' \
+            "$PLUGIN_ID" "$ref" "$short_sha" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+
+          response="$(
+            curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
+              --request POST \
+              --form "chat_id=${TELEGRAM_CHAT_ID}" \
+              --form "document=@dist/${PLUGIN_ID}.eaf;filename=${PLUGIN_ID}.eaf;type=application/octet-stream" \
+              --form "caption=${caption}" \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+          )"
+
+          printf '%s' "$response" | python -c '
+          import json
+          import sys
+          result = json.load(sys.stdin)
+          if not result.get("ok"):
+              raise SystemExit(result.get("description", "Telegram API returned ok=false"))
+          print("Telegram publication succeeded")
+          '

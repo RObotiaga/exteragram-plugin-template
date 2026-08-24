@@ -1,0 +1,7 @@
+id: exteragram_plugin_template
+name: exteraGram plugin template
+description: "Шаблон плагина exteraGram с Kotlin/DEX-движком и многофайловой EAF-сборкой"
+author: "@n08i40k_extera"
+version: "0.0.0"
+app_version: ">=12.5.1"
+sdk_version: ">=1.4.5.3"
