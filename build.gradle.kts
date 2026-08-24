@@ -568,6 +568,7 @@ fun registerBuildDexTask(variant: String) {
                 throw GradleException("r8 failed for variant '$variant' with exit code $exitCode.")
             }
 
+            logger.lifecycle("R8 diagnostics clean for $variant (strict missing-class/rule gate passed)")
             logger.lifecycle(
                 "Dex created for $variant at: ${outputDirFile.absolutePath}/classes.dex"
             )
