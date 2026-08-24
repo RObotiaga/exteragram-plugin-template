@@ -12,7 +12,7 @@
 - `tools/build_eaf.py` — валидирует Python-файлы и Elyx id, добавляет бинарный DEX и собирает единый `.eaf`.
 - `tools/embed_dex.py` — старый упаковщик для совместимого однофайлового режима; в EAF-сборке не используется.
 - `tools/dev_watch.py` — старый live-reload для однофайлового режима через `extera dev-sync`.
-- `libs/Telegram*.jar` — классы хост-приложения; генерируются из APK командой `just update-apk`.
+- `libs/Telegram*.jar` — классы хост-приложения; генерируются из вручную переданного APK командой `just update-apk`.
 
 ## Что находится внутри EAF
 
@@ -33,7 +33,13 @@
 
 `refmap.yml` находится в корне архива и объявляет `assets: assets`. EAF является обычным ZIP-совместимым архивом, поэтому его структуру можно проверить стандартными ZIP-инструментами.
 
-DEX больше не переводится в hex и не вставляется в `main.py`. `JvmPluginBridge` определяет каталог `main.py` через `__file__`, читает `assets/classes.dex` как бинарные данные и передаёт их в `InMemoryDexClassLoader`.
+DEX больше не переводится в hex и не вставляется в `main.py`. В Elyx переменная `__file__` у entry point может отсутствовать, поэтому `JvmPluginBridge` не полагается на неё как на основной источник пути. Загрузчик получает каталог плагинов через `file_utils.get_plugins_dir()` и ищет DEX по структурированному пути:
+
+```text
+<get_plugins_dir()>/ElyxPlugins/<plugin-id>/assets/classes.dex
+```
+
+Если `__file__` доступен, каталог `main.py` используется как дополнительный кандидат. Это сохраняет совместимость с окружениями, где Python entry point запускается обычным способом.
 
 Старый hex-механизм остаётся резервным только для `just embed`, чтобы не ломать однофайловую совместимость во время миграции.
 
@@ -41,13 +47,25 @@ DEX больше не переводится в hex и не вставляетс
 
 Для structured EAF канонический идентификатор хранится в `metainfo.yml` в поле `id`. Elyx разрешает 2–32 ASCII-символа из букв, цифр и `_`; дефис `-` недопустим.
 
-Legacy single-file metadata `__id__` допускает дефис, но `just init` намеренно использует более строгий общий формат, совместимый сразу с обоими режимами:
+Legacy single-file metadata `__id__` допускает дефис, но шаблон намеренно использует более строгий общий формат, совместимый сразу с обоими режимами:
 
 ```text
 ^[A-Za-z][A-Za-z0-9_]{1,31}$
 ```
 
-То есть используйте `my_plugin`, а не `my-plugin`. После `just init` значения `metainfo.id`, Python `__id__`, имя Python-файла и имя EAF синхронизированы.
+То есть используйте `my_plugin`, а не `my-plugin`. Значения `metainfo.id`, Python `__id__`, JVM `Plugin.ID` и имя EAF должны оставаться синхронизированы. `just init` обновляет идентификатор и переименовывает основной Python-файл.
+
+## Метаданные шаблона
+
+Исходная версия шаблона — `0.1.0`. Она синхронизирована между Python `__version__`, `metainfo.yml` и `pyproject.toml`.
+
+Автор по умолчанию:
+
+```text
+@me_tema
+```
+
+Это только стартовое значение. Автор плагина может свободно менять `__author__` и поле `author` в `metainfo.yml`; CI и release workflow не привязаны к конкретному имени автора.
 
 ## Многофайловый Python
 
@@ -90,12 +108,14 @@ assets/
 # переименовать шаблон: Kotlin package, plugin id, отображаемое имя
 just init com.example.myplugin my_plugin "My Plugin"
 
-# положить/обновить libs/Telegram.jar и Telegram-compile.jar из APK хоста
+# вручную получить APK хоста и сгенерировать из него Telegram.jar/Telegram-compile.jar
 just update-apk /path/to/exteragram.apk
 
 # debug DEX
 just dex
 ```
+
+`just update-apk` не скачивает APK автоматически: путь к APK всегда передаётся разработчиком вручную.
 
 ## Сборка EAF
 
@@ -139,12 +159,14 @@ just embed
 # -> dist/<plugin-source>.py
 ```
 
-В этом режиме `tools/embed_dex.py` по-прежнему вставляет DEX в hex-комментарии, а загрузчик автоматически использует их как fallback, если `assets/classes.dex` отсутствует.
+В этом режиме `tools/embed_dex.py` по-прежнему вставляет DEX в hex-комментарии, а загрузчик автоматически использует их как fallback, если structured `assets/classes.dex` отсутствует.
 
 GitHub Actions workflow **Release** публикует `<metainfo.id>.eaf`. Workflow **CI** всегда выполняет smoke-сборку с тестовым бинарным DEX и проверяет:
 
 - валидность Elyx `metainfo.id`;
 - отказ сборки для id с дефисом;
+- совпадение Python `__id__` с `metainfo.id`;
+- совпадение версии между Python, `metainfo.yml` и `pyproject.toml`;
 - наличие `assets/classes.dex`;
 - точное совпадение бинарного DEX с входным файлом;
 - отсутствие DEX-hex в `main.py`;
@@ -152,7 +174,9 @@ GitHub Actions workflow **Release** публикует `<metainfo.id>.eaf`. Work
 - структуру `refmap.yml`;
 - целостность ZIP/EAF.
 
-Если в репозитории присутствуют `libs/Telegram.jar` и `libs/Telegram-compile.jar`, CI дополнительно выполняет полный Gradle → release DEX → EAF путь.
+Значение автора намеренно не сравнивается с шаблонной константой.
+
+Если в репозитории присутствуют `libs/Telegram.jar` и `libs/Telegram-compile.jar`, CI дополнительно выполняет полный Gradle → release DEX → проверку runtime type surface → EAF путь.
 
 ## Релизы
 
@@ -172,7 +196,7 @@ Workflow **Release** запускается вручную и принимает
 
 ## Статус миграции
 
-Многофайловый EAF и бинарный DEX уже разделены: Python-код остаётся обычным исходным кодом, а JVM-движок хранится отдельным `assets/classes.dex`. Structured identity теперь берётся из `metainfo.yml` и проверяется сборщиком. Следующий независимый этап — перевести dev-watch на структурированный Elyx live-reload, чтобы изменения Python-файлов и DEX синхронизировались на устройство независимо.
+Многофайловый EAF и бинарный DEX уже разделены: Python-код остаётся обычным исходным кодом, а JVM-движок хранится отдельным `assets/classes.dex`. Structured identity теперь синхронизирован между Python, Elyx и JVM-частью. Runtime asset resolver поддерживает Elyx, где `__file__` отсутствует. Следующий независимый этап — перевести dev-watch на структурированный Elyx live-reload, чтобы изменения Python-файлов и DEX синхронизировались на устройство независимо.
 
 ## Лицензия
 
