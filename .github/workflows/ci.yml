@@ -18,31 +18,6 @@ jobs:
         with:
           lfs: true
 
-      - name: Ensure Telegram JARs exist
-        run: |
-          for jar in libs/Telegram.jar libs/Telegram-compile.jar; do
-            if [[ ! -s "$jar" ]]; then
-              echo "$jar is missing or Git LFS was not restored" >&2
-              exit 1
-            fi
-          done
-
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: gradle
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        run: |
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platform-tools" "build-tools;36.1.0" "platforms;android-36.1"
-          printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -53,22 +28,30 @@ jobs:
           python -m py_compile tools/embed_dex.py tools/build_eaf.py scripts/prepare_release.py
           python -m compileall -q plugin_src
 
-      - name: Build release DEX
-        run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" buildDexRelease
-
-      - name: Build EAF
+      - name: Resolve plugin source
+        id: plugin
         run: |
           plugin_py="$(grep -ls '^__id__ = ' -- *.py | head -n1)"
           plugin_id="$(sed -n 's/^__id__ = "\(.*\)"$/\1/p' "$plugin_py")"
+          test -n "$plugin_py"
+          test -n "$plugin_id"
+          echo "file=$plugin_py" >> "$GITHUB_OUTPUT"
+          echo "id=$plugin_id" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test EAF packaging
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+        run: |
+          mkdir -p build/ci
+          printf 'dex\n035\0eaf-packaging-smoke-test' > build/ci/classes.dex
           python tools/build_eaf.py \
-            --dex build/outputs/dex/release/classes.dex \
-            --plugin-file "$plugin_py" \
+            --dex build/ci/classes.dex \
+            --plugin-file "$PLUGIN_PY" \
             --refmap refmap.yml \
             --metainfo metainfo.yml \
             --extra-source-dir plugin_src \
-            --output "dist/${plugin_id}.eaf"
+            --output "dist/${PLUGIN_ID}.eaf"
 
       - name: Verify archive layout
         run: |
@@ -89,3 +72,55 @@ jobs:
                   raise SystemExit("archive integrity check failed")
           print(archives[0])
           PY
+
+      - name: Detect host JARs
+        id: host-jars
+        run: |
+          available=true
+          for jar in libs/Telegram.jar libs/Telegram-compile.jar; do
+            if [[ ! -s "$jar" ]]; then
+              echo "::notice::$jar is absent; full Gradle/DEX build is skipped. Run 'just update-apk' and commit libs/ to enable it."
+              available=false
+            fi
+          done
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java
+        if: steps.host-jars.outputs.available == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Android SDK
+        if: steps.host-jars.outputs.available == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        if: steps.host-jars.outputs.available == 'true'
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "build-tools;36.1.0" "platforms;android-36.1"
+          printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Build release DEX
+        if: steps.host-jars.outputs.available == 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" buildDexRelease
+
+      - name: Build EAF with release DEX
+        if: steps.host-jars.outputs.available == 'true'
+        env:
+          PLUGIN_PY: ${{ steps.plugin.outputs.file }}
+          PLUGIN_ID: ${{ steps.plugin.outputs.id }}
+        run: |
+          rm -f "dist/${PLUGIN_ID}.eaf"
+          python tools/build_eaf.py \
+            --dex build/outputs/dex/release/classes.dex \
+            --plugin-file "$PLUGIN_PY" \
+            --refmap refmap.yml \
+            --metainfo metainfo.yml \
+            --extra-source-dir plugin_src \
+            --output "dist/${PLUGIN_ID}.eaf"
